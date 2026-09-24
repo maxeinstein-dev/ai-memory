@@ -27,7 +27,9 @@ pub const BRIEF_CORE_PAGES_LIMIT: usize = 24;
 /// pointers.
 pub const BRIEF_RECENT_PAGES_LIMIT: usize = 10;
 /// Opening fence marking the start of untrusted, dynamically-inserted
-/// content (page bodies, handoff summaries) inside a rendered brief.
+/// content (page bodies, handoff summaries). Shared by every hook surface
+/// that injects stored text: the session brief, the handoff, and the
+/// managed workstream packet.
 pub const UNTRUSTED_HISTORY_START: &str = "<!-- ai-memory:untrusted-history:start -->";
 /// Closing fence matching [`UNTRUSTED_HISTORY_START`].
 pub const UNTRUSTED_HISTORY_END: &str = "<!-- ai-memory:untrusted-history:end -->";
@@ -270,9 +272,10 @@ pub fn render_session_brief(
     Some(buf)
 }
 
-/// Orçamento efetivo do briefing: o pedido (se houver e for número), senão o padrão, sempre dentro de
-/// [`BRIEF_BUDGET_MIN`, `BRIEF_BUDGET_MAX`]. Web e hook usam esta função — a prévia da web só é
-/// idêntica ao que o hook injeta se os dois clamparem igual.
+/// Effective brief budget: the requested value (when present and numeric),
+/// else the default, always within [`BRIEF_BUDGET_MIN`, `BRIEF_BUDGET_MAX`].
+/// The web and the hook both use this, so the web preview matches the
+/// injected text only because both clamp the same way.
 #[must_use]
 pub fn clamp_brief_budget(requested: Option<&str>) -> usize {
     requested
