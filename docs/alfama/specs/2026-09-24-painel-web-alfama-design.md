@@ -60,6 +60,8 @@ Regras do `AGENTS.md` do projeto que o desenho respeita, e onde:
 - **Sem superfície pública sem chamador:** a função tornada `pub` ganha chamador no mesmo PR.
 - **Tailwind:** classe nova exige `TAILWIND_BUILD=1 cargo build -p ai-memory-web` e versionar
   `static/tailwind.css` (o CI confere). Reaproveitar classes já presentes sempre que der.
+- **Idioma:** textos visíveis das telas novas em português (decisão do usuário em 2026-09-24); comentários
+  e docs de código no idioma de cada arquivo (inglês), como pede o AGENTS.md.
 
 Navegação: a página do projeto ganha abas **Páginas** (a atual) | **Briefing** | **Linha do tempo** |
 **Propostas**; o cabeçalho ganha **Entre projetos**. Sem JavaScript novo.
