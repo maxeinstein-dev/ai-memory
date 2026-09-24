@@ -3245,8 +3245,12 @@ async fn namespace_path_lists_its_pages() {
     assert_eq!(empty.status(), StatusCode::NOT_FOUND);
 }
 
+/// The web preview and the hook now both go through
+/// `ai_memory_store::brief::build_session_brief`, so this is no longer
+/// tautological: it pins `montar` to that shared function's output rather
+/// than to a second call of the same renderer assembled by hand.
 #[tokio::test]
-async fn briefing_mostra_o_mesmo_texto_que_o_renderer_do_hook() {
+async fn briefing_montar_usa_a_mesma_funcao_compartilhada_do_hook() {
     let (_tmp, store, _wiki) = setup().await;
     let ws = store
         .writer
@@ -3270,34 +3274,106 @@ async fn briefing_mostra_o_mesmo_texto_que_o_renderer_do_hook() {
         .await
         .unwrap();
 
-    // Expected value computed through the hook's own path: same pages, same
-    // renderer, same clamp.
-    let (core, recent) = store
-        .reader
-        .session_brief_pages_with_slot_visibility(
+    let (esperado_markdown, esperado_orcamento, _esperado_core) =
+        ai_memory_store::brief::build_session_brief(
+            &store.reader,
             ws,
             proj,
-            ai_memory_store::brief::BRIEF_CORE_PAGES_LIMIT,
-            ai_memory_store::brief::BRIEF_RECENT_PAGES_LIMIT,
             ai_memory_core::SlotVisibility::All,
+            None,
         )
         .await
         .unwrap();
-    let esperado = ai_memory_store::brief::render_session_brief(
-        &core,
-        &recent,
-        ai_memory_store::brief::clamp_brief_budget(None),
-    )
-    .unwrap();
 
     let visto = ai_memory_web::montar_briefing_para_teste(&store.reader, ws, proj, None)
         .await
         .unwrap();
     assert_eq!(
-        visto.markdown, esperado,
-        "a prévia divergiu do que o hook injeta"
+        visto.markdown,
+        esperado_markdown.unwrap_or_default(),
+        "a prévia divergiu do que a função compartilhada renderiza"
     );
+    assert_eq!(visto.orcamento, esperado_orcamento);
     assert!(visto.markdown.contains("Nunca faça X"));
+}
+
+/// A core page that budget crowds all the way out — no header, no body —
+/// but that still shows up by title in the "Recently updated pages"
+/// pointer section (every latest page qualifies there, not just core ones)
+/// must NOT be marked as entered. Matching by title alone (the previous
+/// implementation) would count it, because the title text is present
+/// somewhere in the markdown; matching the renderer's exact `` (`path`) ``
+/// body header does not.
+#[tokio::test]
+async fn briefing_entrou_nao_conta_pagina_so_citada_nos_recentes() {
+    let (_tmp, store, _wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+
+    // A: sorts first (`_rules/a-...` < `_rules/b-...`) and is oversized on
+    // its own, so it is truncated to fill the whole per-body ceiling —
+    // leaving nothing for any later core page.
+    store
+        .writer
+        .upsert_page(new_page(
+            ws,
+            proj,
+            "_rules/a-primeira.md",
+            "Regra Um",
+            &"x".repeat(5_000),
+        ))
+        .await
+        .unwrap();
+    // B: written after A, so it is more recently updated and wins the one
+    // slot the tight budget leaves for the "Recently updated pages"
+    // section — while its own body never gets a byte of room.
+    store
+        .writer
+        .upsert_page(new_page(
+            ws,
+            proj,
+            "_rules/b-segunda.md",
+            "Regra Dois",
+            &"y".repeat(500),
+        ))
+        .await
+        .unwrap();
+
+    let visto = ai_memory_web::montar_briefing_para_teste(&store.reader, ws, proj, Some("1500"))
+        .await
+        .unwrap();
+
+    let item_a = visto
+        .itens
+        .iter()
+        .find(|i| i.path == "_rules/a-primeira.md")
+        .expect("Regra Um must be considered");
+    let item_b = visto
+        .itens
+        .iter()
+        .find(|i| i.path == "_rules/b-segunda.md")
+        .expect("Regra Dois must be considered");
+    assert!(item_a.entrou, "the page that got body room must show ✓");
+    assert!(
+        visto.markdown.contains("Regra Dois"),
+        "the crowded-out page must still be named in the recent-pointers \
+         section for this test to exercise the bug: {}",
+        visto.markdown
+    );
+    assert!(
+        !item_b.entrou,
+        "a page only named in \"Recently updated pages\", with no body \
+         header of its own, must not show ✓: {}",
+        visto.markdown
+    );
 }
 
 #[tokio::test]
@@ -3353,7 +3429,9 @@ async fn briefing_clampa_max_chars_como_o_servidor() {
         .await
         .unwrap();
     assert!(
-        std::str::from_utf8(&body).unwrap().contains("1500"),
+        std::str::from_utf8(&body)
+            .unwrap()
+            .contains("de 1500 bytes"),
         "orçamento mínimo não apareceu"
     );
 }

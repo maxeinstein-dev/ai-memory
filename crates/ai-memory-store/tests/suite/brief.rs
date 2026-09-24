@@ -3,11 +3,87 @@
 //! `ai-memory-web`'s briefing preview and the hook use the exact same
 //! function instead of two copies that could drift apart.
 
+use ai_memory_core::{NewPage, PagePath, ProjectId, SlotVisibility, Tier, WorkspaceId};
+use ai_memory_store::Store;
 use ai_memory_store::brief::{
     BRIEF_BUDGET_DEFAULT, BRIEF_BUDGET_MAX, BRIEF_BUDGET_MIN, BRIEF_CORE_PAGES_LIMIT,
-    BRIEF_RECENT_PAGES_LIMIT, UNTRUSTED_HISTORY_END, UNTRUSTED_HISTORY_START, clamp_brief_budget,
-    render_session_brief,
+    BRIEF_RECENT_PAGES_LIMIT, UNTRUSTED_HISTORY_END, UNTRUSTED_HISTORY_START, build_session_brief,
+    clamp_brief_budget, render_session_brief,
 };
+
+async fn seeded() -> (tempfile::TempDir, Store, WorkspaceId, ProjectId) {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let ws = store
+        .writer
+        .get_or_create_workspace("default".to_string())
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "app".to_string(), None)
+        .await
+        .unwrap();
+    (tmp, store, ws, proj)
+}
+
+fn rule_page(ws: WorkspaceId, proj: ProjectId, path: &str, title: &str, body: &str) -> NewPage {
+    NewPage {
+        workspace_id: ws,
+        project_id: proj,
+        path: PagePath::new(path).unwrap(),
+        title: title.to_string(),
+        body: body.into(),
+        tier: Tier::Semantic,
+        frontmatter_json: serde_json::json!({}),
+        pinned: false,
+        links: Vec::new(),
+        author_id: None,
+        expires_at: None,
+        entities: Vec::new(),
+        evidence: Vec::new(),
+    }
+}
+
+/// `build_session_brief` is what both the hook and the web preview now call:
+/// it must clamp an out-of-range requested budget and render the seeded rule
+/// into the markdown, exactly like the two-call sequence
+/// (`session_brief_pages_with_slot_visibility` + `render_session_brief`) it
+/// replaces.
+#[tokio::test]
+async fn build_session_brief_clamps_budget_and_renders_seeded_rule() {
+    let (_tmp, store, ws, proj) = seeded().await;
+    store
+        .writer
+        .upsert_page(rule_page(
+            ws,
+            proj,
+            "_rules/nunca-x.md",
+            "Nunca faça X",
+            "Nunca faça X, porque Y.",
+        ))
+        .await
+        .unwrap();
+
+    let (markdown, budget, core) = build_session_brief(
+        &store.reader,
+        ws,
+        proj,
+        SlotVisibility::All,
+        Some("10"), // below BRIEF_BUDGET_MIN: must clamp up, not error.
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(budget, BRIEF_BUDGET_MIN);
+    let markdown = markdown.expect("a project with a rule page must render a brief");
+    assert!(
+        markdown.contains("Nunca faça X, porque Y."),
+        "seeded rule body missing from brief: {markdown}"
+    );
+    assert_eq!(core.len(), 1);
+    assert_eq!(core[0].path, "_rules/nunca-x.md");
+}
 
 #[test]
 fn clamp_usa_padrao_sem_pedido_e_respeita_limites() {

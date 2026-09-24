@@ -19,9 +19,11 @@ use ai_memory_core::{
     NewSession, ObservationKind, ProjectId, Sanitized, Sanitizer, SessionId, WorkspaceId,
     WorkstreamEvent, WorkstreamEventKind,
 };
+#[cfg(test)]
+use ai_memory_store::brief::{self, render_session_brief};
 use ai_memory_store::brief::{
-    self, BRIEF_CORE_PAGES_LIMIT, BRIEF_RECENT_PAGES_LIMIT, UNTRUSTED_HISTORY_END,
-    UNTRUSTED_HISTORY_START, escape_untrusted_history_tail, render_session_brief,
+    UNTRUSTED_HISTORY_END, UNTRUSTED_HISTORY_START, build_session_brief,
+    escape_untrusted_history_tail,
 };
 use ai_memory_store::{HookSessionAdmission, IngestObservationOutcome, StoreError, WriterHandle};
 use ai_memory_wiki::{AdmissionContext, AdmissionOp, Wiki};
@@ -1516,22 +1518,19 @@ async fn render_requested_session_brief(
     if !crate::payload::query_flag_truthy(query.briefing.as_deref()) {
         return Ok(None);
     }
-    let budget = brief::clamp_brief_budget(query.briefing_budget.as_deref());
-    let (core, recent) = state
-        .reader
-        .session_brief_pages_with_slot_visibility(
-            workspace_id,
-            project_id,
-            BRIEF_CORE_PAGES_LIMIT,
-            BRIEF_RECENT_PAGES_LIMIT,
-            // With `[slots] per_user` on, personal slots reach only their
-            // owner and shared ones reach everyone. With it off — the default
-            // — no slot is anybody's, so the brief carries all of them exactly
-            // as it did before the feature existed.
-            ai_memory_core::SlotVisibility::for_viewer(state.per_user_slots, viewer),
-        )
-        .await?;
-    Ok(render_session_brief(&core, &recent, budget))
+    let (markdown, _budget, _core) = build_session_brief(
+        &state.reader,
+        workspace_id,
+        project_id,
+        // With `[slots] per_user` on, personal slots reach only their
+        // owner and shared ones reach everyone. With it off — the default
+        // — no slot is anybody's, so the brief carries all of them exactly
+        // as it did before the feature existed.
+        ai_memory_core::SlotVisibility::for_viewer(state.per_user_slots, viewer),
+        query.briefing_budget.as_deref(),
+    )
+    .await?;
+    Ok(markdown)
 }
 
 fn combine_handoff_and_brief(

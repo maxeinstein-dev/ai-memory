@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ai_memory_core::{ProjectId, SlotVisibility, WorkspaceId};
 use ai_memory_store::ReaderPool;
-use ai_memory_store::brief::{self, BRIEF_CORE_PAGES_LIMIT, BRIEF_RECENT_PAGES_LIMIT};
+use ai_memory_store::brief;
 use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -30,13 +30,26 @@ pub struct Briefing {
     /// The brief markdown, byte-for-byte what the hook would inject; empty
     /// when the project has no page the brief would carry.
     pub markdown: String,
-    /// Effective char budget after clamping.
+    /// Effective byte budget after clamping.
     pub(crate) orcamento: usize,
     /// Core pages the store returned, whether or not they fit the budget.
     pub(crate) itens: Vec<ItemDoBriefing>,
 }
 
-/// Same pages, same renderer and same clamp as the hook.
+/// Exact header the renderer gives a core page's body (`render_session_brief`
+/// in `brief.rs`): `` (`path`) `` immediately followed by a newline. Unlike
+/// the omitted section's `` - `path` `` line or the recent section's ``
+/// (`path`, kind, timestamp) `` line, this only ever appears when the page's
+/// own body was rendered — so it is what "entered the briefing" actually
+/// means, unlike matching on the page title (which can appear incidentally
+/// inside another page's body or the recent-pointers section).
+fn corpo_header_marker(path: &str) -> String {
+    format!("(`{path}`)\n")
+}
+
+/// Same pages, same renderer and same clamp as the hook — both now go
+/// through [`ai_memory_store::brief::build_session_brief`], so this preview
+/// cannot drift from what the hook injects.
 ///
 /// `SlotVisibility::All`: the web already lists every page of the project
 /// (invariant 16), so with `[slots] per_user = true` the preview shows the
@@ -47,26 +60,16 @@ pub(crate) async fn montar(
     proj: ProjectId,
     max_chars: Option<&str>,
 ) -> anyhow::Result<Briefing> {
-    let orcamento = brief::clamp_brief_budget(max_chars);
-    let (core, recent) = reader
-        .session_brief_pages_with_slot_visibility(
-            ws,
-            proj,
-            BRIEF_CORE_PAGES_LIMIT,
-            BRIEF_RECENT_PAGES_LIMIT,
-            SlotVisibility::All,
-        )
-        .await?;
-    let markdown = brief::render_session_brief(&core, &recent, orcamento).unwrap_or_default();
-    // Matching by title is an approximation; the renderer's own "omitted by
-    // budget" section, which is part of the markdown, is the source of truth.
+    let (markdown, orcamento, core) =
+        brief::build_session_brief(reader, ws, proj, SlotVisibility::All, max_chars).await?;
+    let markdown = markdown.unwrap_or_default();
     let itens = core
         .iter()
         .map(|p| ItemDoBriefing {
             path: p.path.clone(),
             title: p.title.clone(),
-            chars: p.body.chars().count(),
-            entrou: markdown.contains(&p.title),
+            chars: p.body.trim().len(),
+            entrou: markdown.contains(&corpo_header_marker(&p.path)),
         })
         .collect();
     Ok(Briefing {
@@ -89,11 +92,11 @@ pub(crate) async fn handler(
     let b = match montar(&state.reader, ws, proj, params.max_chars.as_deref()).await {
         Ok(b) => b,
         Err(err) => {
-            tracing::error!(error = %err, "montando briefing");
+            tracing::error!(error = %err, "building briefing");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    let usados = b.markdown.chars().count();
+    let usados = b.markdown.len();
     let html = markdown::render(&b.markdown, &workspace, &project);
     let view = BriefingView {
         base_href: project_href(&workspace, &project),
@@ -101,6 +104,7 @@ pub(crate) async fn handler(
         usados,
         orcamento: b.orcamento,
         pct: (usados * 100 / b.orcamento.max(1)).min(100),
+        orcamento_padrao: brief::BRIEF_BUDGET_DEFAULT,
         html,
         markdown: b.markdown,
         itens: b.itens,
@@ -110,7 +114,7 @@ pub(crate) async fn handler(
     match view.render() {
         Ok(html) => Html(html).into_response(),
         Err(err) => {
-            tracing::error!(error = %err, "renderizando briefing");
+            tracing::error!(error = %err, "rendering briefing");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }

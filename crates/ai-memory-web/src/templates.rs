@@ -196,10 +196,12 @@ pub(crate) struct ItemDoBriefing {
     pub path: String,
     /// Page title.
     pub title: String,
-    /// Body length in chars.
+    /// Trimmed body length in bytes — the same unit the renderer budgets
+    /// against (`buf.len()` in `brief.rs`), not chars.
     pub chars: usize,
-    /// Whether the title shows up in the rendered brief (approximation; the
-    /// brief's own "omitted by budget" list is authoritative).
+    /// Whether this page's own body header appears in the rendered brief:
+    /// matches the renderer's exact `` (`path`) `` body-header marker, not
+    /// an approximation by title.
     pub entrou: bool,
 }
 
@@ -215,13 +217,19 @@ pub(crate) struct BriefingView {
     pub base_href: String,
     /// Active panel-tab for `_abas.html`.
     pub aba: &'static str,
-    /// Chars the brief uses.
+    /// Bytes the brief uses (`markdown.len()` — the renderer budgets in
+    /// bytes, not chars; accents and emoji cost more than one).
     pub usados: usize,
-    /// Effective (clamped) char budget.
+    /// Effective (clamped) byte budget.
     pub orcamento: usize,
     /// `usados` as a percentage of `orcamento`, capped at 100 — drives the
     /// inline `width` of the usage bar.
     pub pct: usize,
+    /// `ai_memory_store::brief::BRIEF_BUDGET_DEFAULT` — the budget this
+    /// preview uses when the request carries no `?max_chars=`. Shown so the
+    /// operator does not mistake it for the client's actual
+    /// `[briefing] max_chars`, which the server has no way to see.
+    pub orcamento_padrao: usize,
     /// The brief rendered by this crate's markdown renderer (HTML, trusted).
     pub html: String,
     /// The raw brief markdown, escaped by the template.

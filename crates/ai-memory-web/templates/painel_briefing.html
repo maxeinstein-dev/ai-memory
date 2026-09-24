@@ -15,8 +15,9 @@
 
 {% include "_abas.html" %}
 
-<p class="text-sm text-slate-700 dark:text-slate-300 mb-3">{{ usados }} de {{ orcamento }} caracteres ({{ pct }}%) — é o texto que o agente recebe no início de cada sessão. Simule outro limite com <code class="font-mono">?max_chars=</code>.</p>
+<p class="text-sm text-slate-700 dark:text-slate-300 mb-3">{{ usados }} de {{ orcamento }} bytes ({{ pct }}%; ≈ caracteres — acento e emoji contam mais de 1 byte) — é o texto que o agente recebe no início de cada sessão. Simule outro limite com <code class="font-mono">?max_chars=</code>.</p>
 <div class="w-full h-4 rounded bg-slate-100 dark:bg-slate-800 mb-3"><div class="h-full rounded bg-blue-600" style="width: {{ pct }}%"></div></div>
+<p class="text-xs text-slate-500 dark:text-slate-400 mb-1">Sem <code class="font-mono">?max_chars=</code>, esta prévia usa o padrão do servidor ({{ orcamento_padrao }} bytes); o limite real vem de <code class="font-mono">[briefing] max_chars</code> do marcador <code class="font-mono">.ai-memory.toml</code> do cliente, e o briefing só é injetado quando <code class="font-mono">[briefing] inject_on_session_start</code> está ligado.</p>
 <p class="text-xs text-slate-500 dark:text-slate-400 mb-8">Com <code class="font-mono">[slots] per_user = true</code>, esta prévia mostra os slots de todos os usuários; cada agente recebe só os compartilhados e os dele.</p>
 
 <h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">Como o agente vê</h2>
@@ -54,7 +55,7 @@
 {% else %}
 <ul class="space-y-1 text-sm text-slate-700 dark:text-slate-300">
   {% for i in itens %}
-  <li>{% if i.entrou %}✓{% else %}✗{% endif %} {{ i.title }} <span class="text-xs text-slate-400 dark:text-slate-500">{{ i.path }} · {{ i.chars }} caracteres</span></li>
+  <li>{% if i.entrou %}✓{% else %}✗{% endif %} {{ i.title }} <span class="text-xs text-slate-400 dark:text-slate-500">{{ i.path }} · {{ i.chars }} bytes</span></li>
   {% endfor %}
 </ul>
 {% endif %}

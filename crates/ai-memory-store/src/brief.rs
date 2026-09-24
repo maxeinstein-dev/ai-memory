@@ -4,6 +4,10 @@
 //! `ai-memory-hooks::router` (#176 follow-up) so `ai-memory-web`'s briefing
 //! preview can call the exact renderer the hook uses instead of duplicating it.
 
+use ai_memory_core::{ProjectId, SlotVisibility, WorkspaceId};
+
+use crate::{BriefPageBody, ReaderPool, StoreResult};
+
 /// Default char budget for the session-start brief (~1k tokens at the
 /// usual ~4 chars/token) — enough for a few rules pages without taxing
 /// every session start.
@@ -282,6 +286,42 @@ pub fn clamp_brief_budget(requested: Option<&str>) -> usize {
         .and_then(|v| v.trim().parse::<usize>().ok())
         .unwrap_or(BRIEF_BUDGET_DEFAULT)
         .clamp(BRIEF_BUDGET_MIN, BRIEF_BUDGET_MAX)
+}
+
+/// Fetch and render the session-start brief exactly the way every caller
+/// must: clamp the requested budget, pull the core/recent pages under the
+/// standard limits and the caller's slot visibility, then render. Shared by
+/// the hook (which injects the result at session start) and the web
+/// briefing preview (which shows what the hook would inject), so the two
+/// surfaces cannot drift the way two independent copies of this sequence
+/// eventually would.
+///
+/// Returns the rendered markdown (`None` for a project with no page the
+/// brief would carry), the effective (clamped) budget, and the core pages
+/// considered — callers that need to report on individual pages (the web
+/// preview's "core pages considered" list) get them without a second query.
+///
+/// # Errors
+/// Propagates any SQL or pool error from fetching the brief pages.
+pub async fn build_session_brief(
+    reader: &ReaderPool,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+    slot_visibility: SlotVisibility,
+    requested_budget: Option<&str>,
+) -> StoreResult<(Option<String>, usize, Vec<BriefPageBody>)> {
+    let budget = clamp_brief_budget(requested_budget);
+    let (core, recent) = reader
+        .session_brief_pages_with_slot_visibility(
+            workspace_id,
+            project_id,
+            BRIEF_CORE_PAGES_LIMIT,
+            BRIEF_RECENT_PAGES_LIMIT,
+            slot_visibility,
+        )
+        .await?;
+    let markdown = render_session_brief(&core, &recent, budget);
+    Ok((markdown, budget, core))
 }
 
 #[cfg(test)]
