@@ -35,9 +35,13 @@ sessões já importadas. Três fases, um PR cada no fork.
    ```bash
    CARGO() { MSYS_NO_PATHCONV=1 docker run --rm --user 1000:1000 -e HOME=/tmp/h \
      -e CARGO_HOME=/usr/local/cargo -e RUSTUP_HOME=/usr/local/rustup -v "$PWD:/w" -w /w \
-     -v ai-memory-cargo:/usr/local/cargo/registry -v ai-memory-rustup:/usr/local/rustup -v ai-memory-target:/target \
-     -e CARGO_TARGET_DIR=/target rust:1.95 bash -c "mkdir -p /tmp/h && cargo $*"; }
+     -v ai-memory-cargo:/usr/local/cargo/registry -v ai-memory-rustup:/usr/local/rustup \
+     -v ai-memory-target:/w/target rust:1.95 bash -c "mkdir -p /tmp/h && cargo $*"; }
    ```
+
+   O `target` fica em `/w/target` (dentro da arvore montada em `/w`), sem `CARGO_TARGET_DIR`: os testes
+   de integracao do `ai-memory-cli` localizam o diretorio `hooks/` do repo subindo 3 niveis a partir do
+   caminho do binario de teste, e um `CARGO_TARGET_DIR=/target` fora da arvore (`/w`) quebra essa conta.
 
    Os volumes nomeados guardam registry, toolchain e `target` entre execuções (compilar no bind mount do
    Windows é lento). `bash -c`, não `-lc`: o shell de login do Debian tira `/usr/local/cargo/bin` do PATH.
