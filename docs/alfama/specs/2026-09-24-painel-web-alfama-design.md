@@ -44,8 +44,8 @@ Sem corrigir, a linha do tempo do histórico importado é uma barra só.
 |---|---|
 | `crates/ai-memory-store/src/painel.rs` (novo) | consultas só leitura das quatro telas |
 | `crates/ai-memory-web/src/routes/painel/*.rs` + `templates/painel_*.html` (novos) | rotas e templates askama |
-| `crates/ai-memory-hooks` | **única mudança em código existente**: `render_session_brief` (e o tipo do orçamento) passa a ser `pub`, para a web chamar a MESMA função que o hook |
-| `crates/ai-memory-cli` | backfill grava o `timestamp` original; comando novo `repair-backfill-timestamps` |
+| `crates/ai-memory-store/src/brief.rs` (novo) | `render_session_brief` e as constantes/auxiliares dela **movidas** de `ai-memory-hooks/src/router.rs` (onde eram privadas) — o crate web não depende de hooks, e o store (de onde já vêm `BriefPageBody`/`BriefingPage`) é o ponto comum sem ciclo. Hooks e web chamam a MESMA função |
+| `crates/ai-memory-cli`, `-hooks`, `-core`, `-store` | backfill leva o `occurred_at` do evento até o servidor (campo opcional no body do `/hook` → `HookEnvelope` → `NewSession`/`NewObservation` → os três `Timestamp::now()` de `ops.rs`); comando novo `repair-backfill-timestamps` |
 | `crates/ai-memory-web/src/routes/mod.rs` | 4–5 linhas de registro de rota (o ponto de conflito esperado nos merges) |
 
 Regras do `AGENTS.md` do projeto que o desenho respeita, e onde:
@@ -68,8 +68,9 @@ Navegação: a página do projeto ganha abas **Páginas** (a atual) | **Briefing
 
 ### 3.1. Briefing — `/w/{workspace}/{project}/briefing`
 
-- Texto **exato** do início de sessão, gerado por `render_session_brief` sobre as mesmas páginas que o hook
-  seleciona (`session_brief_pages_with_slot_visibility`) — renderizado e em Markdown cru.
+- Texto **exato** do início de sessão, gerado por `render_session_brief` (agora em `ai_memory_store::brief`)
+  sobre as mesmas páginas que o hook seleciona (`session_brief_pages_with_slot_visibility`, com os mesmos
+  limites de 24 páginas centrais e 10 recentes) — renderizado e em Markdown cru.
 - Barra de uso: caracteres usados × orçamento. O `max_chars` efetivo mora no marcador do **cliente**; a
   tela usa o padrão do servidor e aceita `?max_chars=` para simular, com o **mesmo clamp** que o servidor
   aplica (`BRIEF_BUDGET_MIN`/máximo).
@@ -88,8 +89,9 @@ Navegação: a página do projeto ganha abas **Páginas** (a atual) | **Briefing
 - Filtro por `status` (`pending` por padrão; `approved`, `rejected`, `conflict`).
 - Cada proposta: título, `kind`, operação (`create`/`update`), `target_path`, confiança, justificativa,
   sessões de evidência (links), corpo proposto renderizado e, para `update`, o **diff** contra a página
-  atual — pela mesma lógica que `pending-writes diff` já usa (extraída para função compartilhada se ainda
-  estiver presa ao CLI; nada de biblioteca nova).
+  atual. **Não é diff linha a linha**: o `pending-writes diff` do original também não é (`admin.rs:3030`
+  concatena antes/depois com `format!`) e o workspace não tem crate de diff. A tela mostra **antes e depois
+  lado a lado**, sem dependência nova.
 - Aviso de **conflito** quando a página alvo mudou depois da proposta (`target_body_sha256_at_stage` ≠
   corpo atual).
 - Comandos prontos para copiar: `ai-memory pending-writes approve <ID>` e `ai-memory pending-writes
@@ -111,7 +113,11 @@ Navegação: a página do projeto ganha abas **Páginas** (a atual) | **Briefing
   `observations.created_at` o `timestamp` de cada evento da transcrição; sem `timestamp` num evento, usa o
   do evento anterior (nunca a hora do import no meio de uma sessão datada).
 - **Sessões já importadas:** `ai-memory repair-backfill-timestamps [--project P] [--apply]`
-  - lê as transcrições locais e casa pelo id nativo da sessão;
+  - lê as transcrições locais e casa pelo id da sessão (o id nativo, ou o UUID v5 dele quando o nativo não é
+    UUID — mesma regra de `resolve_native_session_id`);
+  - corrige **`sessions.started_at`/`ended_at`** (primeiro e último `timestamp` da transcrição), que é o que a
+    linha do tempo usa; **não** corrige `observations.created_at` das sessões antigas — não há como casar
+    cada observação ao evento de origem com segurança (as de imports novos já nascem certas pelo item acima);
   - **dry-run por padrão** (relata quantas sessões/observações mudariam e o intervalo de datas);
   - com `--apply`: exige o servidor **parado** (checagem de processo vivo, como `reindex`), escreve pelo
     `WriterHandle`, numa transação por sessão;
