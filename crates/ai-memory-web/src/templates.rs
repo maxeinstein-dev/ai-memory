@@ -179,6 +179,11 @@ pub(crate) struct ProjectView {
     pub system: Vec<Folder>,
     /// N most-recent knowledge pages for the right column.
     pub recent: Vec<PageRow>,
+    /// Link target for this project (`w/{ws}/{proj}`), used by `_abas.html`
+    /// to build the tab hrefs relative to the injected `<base href>`.
+    pub base_href: String,
+    /// Which panel-tab is active; `_abas.html` bolds the matching link.
+    pub aba: &'static str,
 }
 
 /// View-model for a namespace (directory) listing — `GET

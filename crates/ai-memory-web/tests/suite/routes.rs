@@ -144,6 +144,45 @@ async fn smoke_project_page_returns_200() {
 }
 
 #[tokio::test]
+async fn pagina_de_projeto_mostra_as_abas_do_painel() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let _ = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    for href in [
+        "w/default/scratch/briefing",
+        "w/default/scratch/linha-do-tempo",
+        "w/default/scratch/propostas",
+    ] {
+        assert!(text.contains(href), "falta a aba {href}");
+    }
+}
+
+#[tokio::test]
 async fn smoke_page_view_returns_200() {
     let (_tmp, store, wiki) = setup().await;
     let ws = store

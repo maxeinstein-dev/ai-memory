@@ -2,10 +2,14 @@
 
 use std::sync::Arc;
 
+use askama::Template;
 use axum::Router;
+use axum::http::StatusCode;
+use axum::response::{Html, IntoResponse, Response};
 use axum::routing::get;
 
 use crate::state::WebState;
+use crate::templates::NotFoundView;
 
 mod api;
 mod index;
@@ -13,6 +17,16 @@ mod page;
 mod project;
 mod search;
 mod statics;
+
+/// Render a 404 response with the not-found template body. Shared by every
+/// HTML route in this crate (moved here from `page.rs` in Tarefa 2 so the
+/// tela do painel introduced in Tarefa 3 can reuse it).
+pub(crate) fn not_found_response() -> Response {
+    let html = NotFoundView {}
+        .render()
+        .unwrap_or_else(|_| "<h1>Not found</h1>".to_owned());
+    (StatusCode::NOT_FOUND, Html(html)).into_response()
+}
 
 /// Build the read-only web router from a shared [`WebState`].
 pub(crate) fn build(state: Arc<WebState>) -> Router {
