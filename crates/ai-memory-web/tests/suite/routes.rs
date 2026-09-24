@@ -44,6 +44,19 @@ fn new_page(
     }
 }
 
+/// Spin (never sleep) until the wall clock visibly advances by at least one
+/// microsecond. `upsert_page` stamps `updated_at` from `jiff::Timestamp::now()`
+/// at write time with no way for a caller to override it, so two upserts
+/// issued back-to-back can otherwise land in the same microsecond and make
+/// `ORDER BY updated_at DESC` (no tie-break column) non-deterministic between
+/// them. Call this between upserts whose relative recency the test asserts on.
+fn wait_for_next_microsecond() {
+    let start = jiff::Timestamp::now();
+    while jiff::Timestamp::now() == start {
+        std::hint::spin_loop();
+    }
+}
+
 fn wiki_req(
     ws: ai_memory_core::WorkspaceId,
     proj: ai_memory_core::ProjectId,
@@ -3332,6 +3345,10 @@ async fn briefing_entrou_nao_conta_pagina_so_citada_nos_recentes() {
         ))
         .await
         .unwrap();
+    // Force a distinct `updated_at` so B deterministically outranks A in
+    // the `ORDER BY updated_at DESC` recent-pages query (no tie-break
+    // column there — see `wait_for_next_microsecond`).
+    wait_for_next_microsecond();
     // B: written after A, so it is more recently updated and wins the one
     // slot the tight budget leaves for the "Recently updated pages"
     // section — while its own body never gets a byte of room.
