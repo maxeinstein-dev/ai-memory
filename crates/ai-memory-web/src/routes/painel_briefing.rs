@@ -68,7 +68,7 @@ pub(crate) async fn montar(
         .map(|p| ItemDoBriefing {
             path: p.path.clone(),
             title: p.title.clone(),
-            chars: p.body.trim().len(),
+            bytes: p.body.trim().len(),
             entrou: markdown.contains(&corpo_header_marker(&p.path)),
         })
         .collect();

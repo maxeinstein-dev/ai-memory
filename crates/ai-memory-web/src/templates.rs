@@ -198,7 +198,7 @@ pub(crate) struct ItemDoBriefing {
     pub title: String,
     /// Trimmed body length in bytes — the same unit the renderer budgets
     /// against (`buf.len()` in `brief.rs`), not chars.
-    pub chars: usize,
+    pub bytes: usize,
     /// Whether this page's own body header appears in the rendered brief:
     /// matches the renderer's exact `` (`path`) `` body-header marker, not
     /// an approximation by title.

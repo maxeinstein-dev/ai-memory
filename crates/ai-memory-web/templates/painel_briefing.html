@@ -55,7 +55,7 @@
 {% else %}
 <ul class="space-y-1 text-sm text-slate-700 dark:text-slate-300">
   {% for i in itens %}
-  <li>{% if i.entrou %}✓{% else %}✗{% endif %} {{ i.title }} <span class="text-xs text-slate-400 dark:text-slate-500">{{ i.path }} · {{ i.chars }} bytes</span></li>
+  <li>{% if i.entrou %}✓{% else %}✗{% endif %} {{ i.title }} <span class="text-xs text-slate-400 dark:text-slate-500">{{ i.path }} · {{ i.bytes }} bytes</span></li>
   {% endfor %}
 </ul>
 {% endif %}
