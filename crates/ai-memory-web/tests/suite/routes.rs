@@ -3195,3 +3195,116 @@ async fn namespace_path_lists_its_pages() {
         .unwrap();
     assert_eq!(empty.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn briefing_mostra_o_mesmo_texto_que_o_renderer_do_hook() {
+    let (_tmp, store, _wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(new_page(
+            ws,
+            proj,
+            "_rules/nunca-x.md",
+            "Nunca faça X",
+            "Nunca faça X, porque Y.",
+        ))
+        .await
+        .unwrap();
+
+    // Expected value computed through the hook's own path: same pages, same
+    // renderer, same clamp.
+    let (core, recent) = store
+        .reader
+        .session_brief_pages_with_slot_visibility(
+            ws,
+            proj,
+            ai_memory_store::brief::BRIEF_CORE_PAGES_LIMIT,
+            ai_memory_store::brief::BRIEF_RECENT_PAGES_LIMIT,
+            ai_memory_core::SlotVisibility::All,
+        )
+        .await
+        .unwrap();
+    let esperado = ai_memory_store::brief::render_session_brief(
+        &core,
+        &recent,
+        ai_memory_store::brief::clamp_brief_budget(None),
+    )
+    .unwrap();
+
+    let visto = ai_memory_web::montar_briefing_para_teste(&store.reader, ws, proj, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        visto.markdown, esperado,
+        "a prévia divergiu do que o hook injeta"
+    );
+    assert!(visto.markdown.contains("Nunca faça X"));
+}
+
+#[tokio::test]
+async fn briefing_de_projeto_inexistente_responde_404() {
+    let (_tmp, store, wiki) = setup().await;
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/nao-existe/briefing")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&body)
+            .unwrap()
+            .contains("Page not found"),
+        "o 404 da tela tem de ser a página HTML de not-found"
+    );
+}
+
+#[tokio::test]
+async fn briefing_clampa_max_chars_como_o_servidor() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let _ = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/briefing?max_chars=10")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        std::str::from_utf8(&body).unwrap().contains("1500"),
+        "orçamento mínimo não apareceu"
+    );
+}

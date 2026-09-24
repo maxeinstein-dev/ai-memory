@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use ai_memory_core::{ProjectId, WorkspaceId};
+use ai_memory_store::{ResolvedScope, lookup_existing_scope};
 use askama::Template;
 use axum::Router;
 use axum::http::StatusCode;
@@ -14,6 +16,7 @@ use crate::templates::NotFoundView;
 mod api;
 mod index;
 mod page;
+pub(crate) mod painel_briefing;
 mod project;
 mod search;
 mod statics;
@@ -28,12 +31,38 @@ pub(crate) fn not_found_response() -> Response {
     (StatusCode::NOT_FOUND, Html(html)).into_response()
 }
 
+/// Resolve the scope of a panel screen without creating anything: an unknown
+/// workspace/project answers the HTML 404 page, any other store failure a
+/// logged 500. Unlike the project overview (which renders an empty tree for
+/// an unknown project), panel screens need real ids to query with.
+pub(crate) async fn escopo_html(
+    state: &WebState,
+    workspace: &str,
+    project: &str,
+) -> Result<(WorkspaceId, ProjectId), Response> {
+    lookup_existing_scope(&state.reader, workspace, project)
+        .await
+        .map(ResolvedScope::as_tuple)
+        .map_err(|err| {
+            if err.is_not_found() {
+                not_found_response()
+            } else {
+                tracing::error!(error = %err, "resolvendo escopo da tela do painel");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        })
+}
+
 /// Build the read-only web router from a shared [`WebState`].
 pub(crate) fn build(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/", get(index::handler))
         .route("/w/{workspace}/{project}", get(project::handler))
         .route("/w/{workspace}/{project}/p/{*path}", get(page::handler))
+        .route(
+            "/w/{workspace}/{project}/briefing",
+            get(painel_briefing::handler),
+        )
         .route("/search", get(search::handler))
         .route("/static/tailwind.css", get(statics::tailwind_css))
         .route("/static/logo.png", get(statics::logo))
