@@ -8,6 +8,7 @@ mod audit_contamination;
 mod audit_log;
 mod auto_improve_staging;
 mod belief_authority;
+mod brief;
 mod client_activity;
 mod fts_drift_status;
 mod handoff_ownership;

@@ -17,6 +17,7 @@ use rusqlite::Connection;
 mod api_credentials;
 mod auto_improve;
 pub mod belief;
+pub mod brief;
 pub mod decay;
 mod error;
 mod fts_query;
