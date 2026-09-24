@@ -26,12 +26,14 @@ sessões já importadas. Três fases, um PR cada no fork.
 
    ```bash
    CARGO() { MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD:/w" -w /w \
-     -v ai-memory-cargo:/usr/local/cargo/registry -v ai-memory-target:/target \
-     -e CARGO_TARGET_DIR=/target rust:1.95 bash -lc "rustup component add rustfmt clippy >/dev/null 2>&1; cargo $*"; }
+     -v ai-memory-cargo:/usr/local/cargo/registry -v ai-memory-rustup:/usr/local/rustup -v ai-memory-target:/target \
+     -e CARGO_TARGET_DIR=/target rust:1.95 bash -c "cargo $*"; }
    ```
 
-   Os volumes nomeados guardam registry e `target` entre execuções (compilar no bind mount do Windows é
-   lento). O projeto usa `cargo nextest` (`cargo t`); no container use `cargo test` — é o que o CI roda.
+   Os volumes nomeados guardam registry, toolchain e `target` entre execuções (compilar no bind mount do
+   Windows é lento). `bash -c`, não `-lc`: o shell de login do Debian tira `/usr/local/cargo/bin` do PATH.
+   `rust-toolchain.toml` já instala rustfmt e clippy. Baseline medido (Tarefa 0, 2026-09-24): hooks 308,
+   store 488 (+1 ignorado de propósito), web 114, tudo verde, ~3,5 min com cache.
 2. **Gate antes de cada PR** (AGENTS.md): `CARGO fmt --all -- --check`, `git diff --check`,
    `CARGO clippy --workspace --all-targets -- -D warnings`, `CARGO test --workspace --all-targets`.
 3. **Testes** ficam na `tests/suite/` de cada crate, declarados no `mod.rs` dela (compilam no harness da
