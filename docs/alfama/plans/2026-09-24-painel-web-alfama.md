@@ -24,18 +24,33 @@ sessões já importadas. Três fases, um PR cada no fork.
 1. **Não há Rust no Windows.** Todo `cargo` roda num container. Definição usada no plano inteiro como
    `CARGO <args>`, a partir da raiz do fork (`C:\Users\Maxsuel Einstein\Local Sites\ai-memory`, Git Bash):
 
+   Uma vez, transferir os volumes de cache para uid 1000 (rodar como root faz `chmod` virar no-op, o que
+   falseia 2 testes de logging do `ai-memory-cli`; ver item 2):
+
    ```bash
-   CARGO() { MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD:/w" -w /w \
+   MSYS_NO_PATHCONV=1 docker run --rm -v ai-memory-cargo:/c -v ai-memory-rustup:/r -v ai-memory-target:/t \
+     rust:1.95 chown -R 1000:1000 /c /r /t
+   ```
+
+   ```bash
+   CARGO() { MSYS_NO_PATHCONV=1 docker run --rm --user 1000:1000 -e HOME=/tmp/h \
+     -e CARGO_HOME=/usr/local/cargo -e RUSTUP_HOME=/usr/local/rustup -v "$PWD:/w" -w /w \
      -v ai-memory-cargo:/usr/local/cargo/registry -v ai-memory-rustup:/usr/local/rustup -v ai-memory-target:/target \
-     -e CARGO_TARGET_DIR=/target rust:1.95 bash -c "cargo $*"; }
+     -e CARGO_TARGET_DIR=/target rust:1.95 bash -c "mkdir -p /tmp/h && cargo $*"; }
    ```
 
    Os volumes nomeados guardam registry, toolchain e `target` entre execuções (compilar no bind mount do
    Windows é lento). `bash -c`, não `-lc`: o shell de login do Debian tira `/usr/local/cargo/bin` do PATH.
    `rust-toolchain.toml` já instala rustfmt e clippy. Baseline medido (Tarefa 0, 2026-09-24): hooks 308,
    store 488 (+1 ignorado de propósito), web 114, tudo verde, ~3,5 min com cache.
-2. **Gate antes de cada PR** (AGENTS.md): `CARGO fmt --all -- --check`, `git diff --check`,
-   `CARGO clippy --workspace --all-targets -- -D warnings`, `CARGO test --workspace --all-targets`.
+2. **Gate antes de cada PR** (AGENTS.md), em duas partes — workspace sem o `cli`, depois o `cli` isolado:
+   `CARGO fmt --all -- --check`; `git diff --check`;
+   `CARGO clippy --workspace --all-targets -- -D warnings`;
+   `CARGO test --workspace --all-targets --no-fail-fast --exclude ai-memory-cli`; e, separado,
+   `CARGO test -p ai-memory-cli --all-targets -- --test-threads=1`. Motivo, em uma linha: root ignora
+   `chmod` (falseia testes de logging do `cli`) e os testes de hooks do `cli` ficam instáveis sob
+   paralelismo da suíte inteira no bind mount do Windows — a CI do GitHub é a juíza final, não este gate
+   local.
 3. **Testes** ficam na `tests/suite/` de cada crate, declarados no `mod.rs` dela (compilam no harness da
    lib; **nenhum binário novo**). Web: `crates/ai-memory-web/tests/suite/routes.rs` tem `setup()`,
    `new_page(..)`, `seed_session(..)`, `handoff_for(..)`, `api_req(..)`. Store: cada arquivo abre
