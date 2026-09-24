@@ -22,8 +22,7 @@ mod search;
 mod statics;
 
 /// Render a 404 response with the not-found template body. Shared by every
-/// HTML route in this crate (moved here from `page.rs` in Tarefa 2 so the
-/// tela do painel introduced in Tarefa 3 can reuse it).
+/// HTML route in this crate.
 pub(crate) fn not_found_response() -> Response {
     let html = NotFoundView {}
         .render()
