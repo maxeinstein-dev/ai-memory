@@ -142,7 +142,11 @@ Gate antes de cada PR (dentro de um container `rust:1.95`, sem toolchain no Wind
 
 **Fases, um PR cada no fork:**
 
-1. **Base + Briefing:** `core.longpaths` documentado, branch `alfama/main`, workflows de publicação
+1. **Base + Briefing:** clone do fork com `core.longpaths true` (o repositório tem caminhos acima do
+   limite do Windows; sem isso o checkout falha em `routing_skills/`) e `core.autocrlf false` (o Git for
+   Windows vem com `true` na config de sistema, e o checkout medido em 2026-09-24 pôs CRLF no
+   `docker/Dockerfile`, em `bin/release` e nos scripts `.sh` — que quebram quando o build os executa num
+   container Linux; refazer o checkout depois de desligar), branch `alfama/main`, workflows de publicação
    desligados, build da imagem, troca da imagem no compose local, tela de Briefing (a menor, prova o
    caminho inteiro).
 2. **Propostas + Linha do tempo + correção das datas.**
