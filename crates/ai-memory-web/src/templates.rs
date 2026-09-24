@@ -186,6 +186,50 @@ pub(crate) struct ProjectView {
     pub aba: &'static str,
 }
 
+// ---------------------------------------------------------------------------
+// painel_briefing.html
+// ---------------------------------------------------------------------------
+
+/// One core page the session brief considered.
+pub(crate) struct ItemDoBriefing {
+    /// Relative wiki path.
+    pub path: String,
+    /// Page title.
+    pub title: String,
+    /// Body length in chars.
+    pub chars: usize,
+    /// Whether the title shows up in the rendered brief (approximation; the
+    /// brief's own "omitted by budget" list is authoritative).
+    pub entrou: bool,
+}
+
+/// View-model for `GET /w/:workspace/:project/briefing`.
+#[derive(Template)]
+#[template(path = "painel_briefing.html")]
+pub(crate) struct BriefingView {
+    /// Workspace name.
+    pub workspace: String,
+    /// Project name.
+    pub project: String,
+    /// Link target for this project, used by `_abas.html`.
+    pub base_href: String,
+    /// Active panel-tab for `_abas.html`.
+    pub aba: &'static str,
+    /// Chars the brief uses.
+    pub usados: usize,
+    /// Effective (clamped) char budget.
+    pub orcamento: usize,
+    /// `usados` as a percentage of `orcamento`, capped at 100 — drives the
+    /// inline `width` of the usage bar.
+    pub pct: usize,
+    /// The brief rendered by this crate's markdown renderer (HTML, trusted).
+    pub html: String,
+    /// The raw brief markdown, escaped by the template.
+    pub markdown: String,
+    /// Core pages the store returned.
+    pub itens: Vec<ItemDoBriefing>,
+}
+
 /// View-model for a namespace (directory) listing — `GET
 /// /w/:workspace/:project/p/:namespace/` when the path names a namespace
 /// rather than a page (#603).
