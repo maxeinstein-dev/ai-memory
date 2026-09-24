@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum::response::Html;
 
 use crate::state::WebState;
-use crate::templates::{Folder, PageRow, ProjectView, humanize, page_href};
+use crate::templates::{Folder, PageRow, ProjectView, humanize, page_href, project_href};
 
 /// Handler for `GET /w/:workspace/:project`.
 pub(crate) async fn handler(
@@ -88,12 +88,15 @@ pub(crate) async fn handler(
         })
         .collect();
 
+    let base_href = project_href(&workspace, &project);
     let html = ProjectView {
         workspace,
         project,
         folders,
         system,
         recent,
+        base_href,
+        aba: "paginas",
     }
     .render()
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
