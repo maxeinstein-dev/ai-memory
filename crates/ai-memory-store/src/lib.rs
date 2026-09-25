@@ -24,6 +24,7 @@ mod fts_query;
 mod maintenance;
 mod migrations;
 mod ops;
+mod painel;
 pub mod password;
 mod reader;
 mod retrieval_tuning;
@@ -63,6 +64,7 @@ pub use ops::{
     PurgeSummary, ReorgSummary, backfill_entity_index, backfill_page_windows,
     backfill_page_windows_in_batches, purge_session, record_embed_failure,
 };
+pub use painel::{PaginaProduzida, SessaoNaLinha};
 pub use reader::{
     ActivityWindow, AgentSessionCount, AuditEvent, AuditLogFilter, AutoImproveCandidateSession,
     AutoImproveParkedClaim, BriefPageBody, BriefingPage, BriefingSnapshot, ClientActivity,

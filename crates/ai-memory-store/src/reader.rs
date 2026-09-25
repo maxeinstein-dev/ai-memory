@@ -75,7 +75,7 @@ fn now_us() -> i64 {
     Timestamp::now().as_microsecond()
 }
 
-fn page_kind_expr(path_column: &str, frontmatter_column: &str) -> String {
+pub(crate) fn page_kind_expr(path_column: &str, frontmatter_column: &str) -> String {
     format!(
         "COALESCE( \
             json_extract({frontmatter_column}, '$.kind'), \
