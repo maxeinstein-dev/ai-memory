@@ -4,11 +4,13 @@
 //! project_id) per the fork's inherited security requirements
 //! (docs/alfama/specs/2026-09-24-painel-web-alfama-design.md §2.1).
 
+use std::collections::HashMap;
+
 use ai_memory_core::{
     AgentKind, NewPage, NewSession, PageEvidence, PageEvidenceKind, PagePath, ProjectId, SessionId,
     Tier, WorkspaceId,
 };
-use ai_memory_store::Store;
+use ai_memory_store::{RuleCandidate, Store, f32_vec_to_bytes, group_rules};
 
 async fn seeded() -> (tempfile::TempDir, Store, WorkspaceId, ProjectId) {
     let tmp = tempfile::tempdir().unwrap();
@@ -45,6 +47,18 @@ fn page(ws: WorkspaceId, proj: ProjectId, path: &str, title: &str, body: &str) -
         entities: Vec::new(),
         evidence: Vec::new(),
     }
+}
+
+/// A `_rules/` page: `page_kind_expr` infers `kind = 'rule'` for it from the
+/// path alone, same as the tests in `Tarefa 13` of the panel plan.
+fn rule_page(ws: WorkspaceId, proj: ProjectId, slug: &str, title: &str) -> NewPage {
+    page(
+        ws,
+        proj,
+        &format!("_rules/{slug}.md"),
+        title,
+        "corpo da regra",
+    )
 }
 
 async fn begun_session(store: &Store, ws: WorkspaceId, proj: ProjectId) -> SessionId {
@@ -322,4 +336,467 @@ async fn legitimate_session_appears_in_its_own_project_timeline() {
     let timeline = store.reader.timeline(ws, proj, 0).await.unwrap();
     assert_eq!(timeline.len(), 1);
     assert_eq!(timeline[0].id, sid.to_string());
+}
+
+// --- `group_rules` (pure) + `ReaderPool::rules_across_projects` ---
+//
+// Rule pages that say the same thing, repeated across projects, are
+// candidates for promotion to a shared/global rule (Tarefa 13, plan
+// `docs/alfama/plans/2026-09-24-painel-web-alfama.md`, §Fase 3).
+
+fn candidate(
+    ws: WorkspaceId,
+    project: &str,
+    path: &str,
+    title: &str,
+    vector: Option<Vec<f32>>,
+) -> RuleCandidate {
+    RuleCandidate {
+        workspace: ws,
+        project: project.to_string(),
+        path: path.to_string(),
+        title: title.to_string(),
+        vector,
+    }
+}
+
+/// Similar rules (by cosine over their embeddings) in different projects
+/// group together; a dissimilar rule does not join the group.
+#[test]
+fn similar_rules_across_projects_group_together() {
+    let ws = WorkspaceId::new();
+    let rules = vec![
+        candidate(
+            ws,
+            "a",
+            "_rules/env.md",
+            "Nunca commitar .env",
+            Some(vec![1.0, 0.0]),
+        ),
+        candidate(
+            ws,
+            "b",
+            "_rules/env.md",
+            "Nao versionar arquivos .env",
+            Some(vec![0.99, 0.05]),
+        ),
+        candidate(ws, "c", "_rules/tabs.md", "Usar tabs", Some(vec![0.0, 1.0])),
+    ];
+
+    let groups = group_rules(rules, 0.85);
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].projects(), vec!["a".to_string(), "b".to_string()]);
+}
+
+/// Without a vector, two rules in different projects still group when their
+/// titles are equal modulo case, accents and whitespace.
+#[test]
+fn no_vector_groups_by_normalized_title() {
+    let ws = WorkspaceId::new();
+    let rules = vec![
+        candidate(ws, "a", "_rules/x.md", "Nunca Commitar Segredos", None),
+        candidate(ws, "b", "_rules/x.md", "nunca   commitar segredos", None),
+    ];
+
+    let groups = group_rules(rules, 0.85);
+
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].projects(), vec!["a".to_string(), "b".to_string()]);
+}
+
+/// Two similar rules in the *same* project never form a group by
+/// themselves — promotion candidates need at least two distinct projects.
+#[test]
+fn same_project_pair_alone_does_not_form_a_group() {
+    let ws = WorkspaceId::new();
+    let rules = vec![
+        candidate(
+            ws,
+            "a",
+            "_rules/x.md",
+            "Nunca commitar .env",
+            Some(vec![1.0, 0.0]),
+        ),
+        candidate(
+            ws,
+            "a",
+            "_rules/y.md",
+            "Nao versionar .env",
+            Some(vec![0.99, 0.05]),
+        ),
+    ];
+
+    let groups = group_rules(rules, 0.85);
+
+    assert!(groups.is_empty());
+}
+
+/// A zero-norm vector has no defined direction; cosine must be guarded
+/// against it rather than dividing by zero (which would panic or produce
+/// `NaN`, and `NaN >= threshold` is always false anyway but the guard makes
+/// the intent explicit and the behavior independent of float edge cases).
+#[test]
+fn zero_norm_vectors_never_link() {
+    let ws = WorkspaceId::new();
+    let rules = vec![
+        candidate(ws, "a", "_rules/x.md", "Regra A", Some(vec![0.0, 0.0])),
+        candidate(ws, "b", "_rules/y.md", "Regra B", Some(vec![0.0, 0.0])),
+    ];
+
+    let groups = group_rules(rules, 0.0);
+
+    assert!(
+        groups.is_empty(),
+        "zero-norm vectors must never be judged similar, even at threshold 0.0"
+    );
+}
+
+/// Vectors of different dims must never be compared, even when the
+/// threshold would otherwise be trivially satisfied.
+#[test]
+fn vectors_of_different_dims_are_never_compared() {
+    let ws = WorkspaceId::new();
+    let rules = vec![
+        candidate(ws, "a", "_rules/x.md", "Regra A", Some(vec![1.0, 0.0])),
+        candidate(
+            ws,
+            "b",
+            "_rules/y.md",
+            "Regra B diferente",
+            Some(vec![1.0, 0.0, 0.0]),
+        ),
+    ];
+
+    let groups = group_rules(rules, 0.5);
+
+    assert!(groups.is_empty());
+}
+
+/// `rules_across_projects` only attaches a vector when its
+/// `(provider, model, dim)` triple is the workspace's most common one
+/// (invariant 8); a page embedded under a different model is still
+/// returned, but with `vector: None`.
+#[tokio::test]
+async fn rules_across_projects_ignores_vectors_of_a_non_majority_triple() {
+    let (_tmp, store, ws, proj_p) = seeded().await;
+    let proj_b = store
+        .writer
+        .get_or_create_project(ws, "b".to_string(), None)
+        .await
+        .unwrap();
+    let proj_c = store
+        .writer
+        .get_or_create_project(ws, "c".to_string(), None)
+        .await
+        .unwrap();
+
+    let p_id = store
+        .writer
+        .upsert_page(rule_page(ws, proj_p, "env", "Nunca commitar .env"))
+        .await
+        .unwrap();
+    let b_id = store
+        .writer
+        .upsert_page(rule_page(ws, proj_b, "env", "Nao versionar .env"))
+        .await
+        .unwrap();
+    let c_id = store
+        .writer
+        .upsert_page(rule_page(ws, proj_c, "env", "Nunca subir .env"))
+        .await
+        .unwrap();
+
+    // Majority triple in this workspace: (mock, mock-embed, 2), two rows.
+    // The minority triple (mock, old-embed, 2) has just one row.
+    store
+        .writer
+        .store_embedding(
+            p_id,
+            f32_vec_to_bytes(&[1.0, 0.0]),
+            "mock".into(),
+            "mock-embed".into(),
+            2,
+        )
+        .await
+        .unwrap();
+    store
+        .writer
+        .store_embedding(
+            b_id,
+            f32_vec_to_bytes(&[0.99, 0.05]),
+            "mock".into(),
+            "mock-embed".into(),
+            2,
+        )
+        .await
+        .unwrap();
+    store
+        .writer
+        .store_embedding(
+            c_id,
+            f32_vec_to_bytes(&[0.0, 1.0]),
+            "mock".into(),
+            "old-embed".into(),
+            2,
+        )
+        .await
+        .unwrap();
+
+    let candidates = store.reader.rules_across_projects(ws).await.unwrap();
+    assert_eq!(candidates.len(), 3);
+    let by_project: HashMap<String, RuleCandidate> = candidates
+        .into_iter()
+        .map(|c| (c.project.clone(), c))
+        .collect();
+    assert!(by_project["p"].vector.is_some());
+    assert!(by_project["b"].vector.is_some());
+    assert!(
+        by_project["c"].vector.is_none(),
+        "a vector from a non-majority (provider, model, dim) triple must be ignored"
+    );
+}
+
+/// End-to-end: once a non-majority-triple vector is dropped to `None`,
+/// grouping still finds the pair through the normalized-title fallback.
+#[tokio::test]
+async fn non_majority_model_vectors_fall_back_to_title_matching() {
+    let (_tmp, store, ws, proj_p) = seeded().await;
+    let proj_maj_a = store
+        .writer
+        .get_or_create_project(ws, "maj-a".to_string(), None)
+        .await
+        .unwrap();
+    let proj_maj_b = store
+        .writer
+        .get_or_create_project(ws, "maj-b".to_string(), None)
+        .await
+        .unwrap();
+    let proj_minor = store
+        .writer
+        .get_or_create_project(ws, "minor".to_string(), None)
+        .await
+        .unwrap();
+
+    // Establish the majority triple with two unrelated rules elsewhere in
+    // the workspace.
+    let maj_a_id = store
+        .writer
+        .upsert_page(rule_page(ws, proj_maj_a, "other", "Outra regra"))
+        .await
+        .unwrap();
+    let maj_b_id = store
+        .writer
+        .upsert_page(rule_page(ws, proj_maj_b, "other2", "Outra regra 2"))
+        .await
+        .unwrap();
+    store
+        .writer
+        .store_embedding(
+            maj_a_id,
+            f32_vec_to_bytes(&[1.0, 0.0]),
+            "mock".into(),
+            "main".into(),
+            2,
+        )
+        .await
+        .unwrap();
+    store
+        .writer
+        .store_embedding(
+            maj_b_id,
+            f32_vec_to_bytes(&[0.0, 1.0]),
+            "mock".into(),
+            "main".into(),
+            2,
+        )
+        .await
+        .unwrap();
+
+    // Two rules with the same normalized title, both embedded under a
+    // non-majority triple: their vectors must be ignored, so grouping can
+    // only find them via the title fallback.
+    let p_id = store
+        .writer
+        .upsert_page(rule_page(ws, proj_p, "env", "Nunca commitar .env"))
+        .await
+        .unwrap();
+    let minor_id = store
+        .writer
+        .upsert_page(rule_page(ws, proj_minor, "env", "nunca   commitar .env"))
+        .await
+        .unwrap();
+    store
+        .writer
+        .store_embedding(
+            p_id,
+            f32_vec_to_bytes(&[1.0, 0.0, 0.0]),
+            "mock".into(),
+            "stale".into(),
+            3,
+        )
+        .await
+        .unwrap();
+    store
+        .writer
+        .store_embedding(
+            minor_id,
+            f32_vec_to_bytes(&[0.0, 0.0, 1.0]),
+            "mock".into(),
+            "stale".into(),
+            3,
+        )
+        .await
+        .unwrap();
+
+    let candidates = store.reader.rules_across_projects(ws).await.unwrap();
+    let by_project: HashMap<String, RuleCandidate> = candidates
+        .into_iter()
+        .map(|c| (c.project.clone(), c))
+        .collect();
+    assert!(by_project["p"].vector.is_none());
+    assert!(by_project["minor"].vector.is_none());
+    assert!(by_project["maj-a"].vector.is_some());
+
+    let groups = group_rules(
+        vec![by_project["p"].clone(), by_project["minor"].clone()],
+        0.85,
+    );
+    assert_eq!(groups.len(), 1);
+    assert_eq!(
+        groups[0].projects(),
+        vec!["minor".to_string(), "p".to_string()]
+    );
+}
+
+/// A malformed embedding blob (length not a multiple of 4) must decode to
+/// `None` rather than panicking.
+#[tokio::test]
+async fn malformed_embedding_blob_becomes_none_without_panicking() {
+    let (_tmp, store, ws, proj) = seeded().await;
+    let id = store
+        .writer
+        .upsert_page(rule_page(ws, proj, "env", "Regra"))
+        .await
+        .unwrap();
+    store
+        .writer
+        .store_embedding(id, vec![1, 2, 3, 4, 5], "mock".into(), "main".into(), 1)
+        .await
+        .unwrap();
+
+    let candidates = store.reader.rules_across_projects(ws).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(
+        candidates[0].vector.is_none(),
+        "a malformed blob must decode to None, never panic"
+    );
+}
+
+/// A blob whose length is a clean multiple of 4 but does not match the
+/// stored `dim` must also decode to `None`, never panic and never be
+/// silently truncated/padded.
+#[tokio::test]
+async fn embedding_length_mismatched_with_dim_becomes_none() {
+    let (_tmp, store, ws, proj) = seeded().await;
+    let id = store
+        .writer
+        .upsert_page(rule_page(ws, proj, "env", "Regra"))
+        .await
+        .unwrap();
+    store
+        .writer
+        .store_embedding(
+            id,
+            f32_vec_to_bytes(&[1.0, 0.0]),
+            "mock".into(),
+            "main".into(),
+            3,
+        )
+        .await
+        .unwrap();
+
+    let candidates = store.reader.rules_across_projects(ws).await.unwrap();
+    assert_eq!(candidates.len(), 1);
+    assert!(candidates[0].vector.is_none());
+}
+
+// --- Adversarial security-boundary test (alfama-4, docs/security-boundaries.md) ---
+//
+// `rules_across_projects` aggregates *across projects* by design (that is
+// the point of the "Entre projetos" screen), but per the fork's AGENTS.md
+// rule any entry point that fans out across projects is guilty of leaking
+// across *workspaces* until an adversarial test proves otherwise.
+
+/// Two equivalent rules in two different workspaces never appear together:
+/// calling `rules_across_projects` for workspace A returns none of
+/// workspace B's rules, so they can never be grouped. Control: within one
+/// workspace, an equivalent rule pair across two of its own projects does
+/// group.
+#[tokio::test]
+async fn rules_from_another_workspace_never_appear_or_group() {
+    let (_tmp, store, ws_a, proj_a) = seeded().await;
+    let ws_b = store
+        .writer
+        .get_or_create_workspace("outra-workspace".to_string())
+        .await
+        .unwrap();
+    let proj_b = store
+        .writer
+        .get_or_create_project(ws_b, "p".to_string(), None)
+        .await
+        .unwrap();
+
+    store
+        .writer
+        .upsert_page(rule_page(ws_a, proj_a, "env", "Nunca commitar .env"))
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(rule_page(ws_b, proj_b, "env", "Nunca commitar .env"))
+        .await
+        .unwrap();
+
+    let candidates_a = store.reader.rules_across_projects(ws_a).await.unwrap();
+    assert_eq!(
+        candidates_a.len(),
+        1,
+        "workspace A must not see workspace B's equivalent rule"
+    );
+    assert_eq!(candidates_a[0].project, "p");
+
+    let groups_a = group_rules(candidates_a, 0.85);
+    assert!(
+        groups_a.is_empty(),
+        "workspace A's single project cannot form a cross-project group by itself, \
+         which is exactly what stops it from ever grouping with workspace B's rule"
+    );
+
+    // Control: within workspace B alone, the same rule repeated in a
+    // second project of that workspace DOES group.
+    let proj_b2 = store
+        .writer
+        .get_or_create_project(ws_b, "q".to_string(), None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(rule_page(ws_b, proj_b2, "env", "nunca   commitar .env"))
+        .await
+        .unwrap();
+
+    let candidates_b = store.reader.rules_across_projects(ws_b).await.unwrap();
+    assert_eq!(candidates_b.len(), 2);
+    let groups_b = group_rules(candidates_b, 0.85);
+    assert_eq!(
+        groups_b.len(),
+        1,
+        "control: within the same workspace, an equivalent rule across two \
+         of its own projects does group"
+    );
+    assert_eq!(
+        groups_b[0].projects(),
+        vec!["p".to_string(), "q".to_string()]
+    );
 }
