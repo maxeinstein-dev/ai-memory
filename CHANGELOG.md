@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- (fork alfama) `ci.yml` also runs on push to `alfama/main`, the fork's
+  trunk. GitHub Actions only restores caches from a PR's own ref, its base
+  branch or the default branch, and upstream's workflow runs on push to
+  `main` only, so no fork run ever saved a cache a later PR could restore:
+  every fork PR compiled the workspace cold (~9 min for `test`, ~8 min for
+  `release-build`). A new fork-only workflow, `alfama-guard.yml`, fails any
+  PR whose `ci.yml` drops `alfama/main` from `on.push.branches` (the line a
+  rebase onto upstream would lose), via `scripts/alfama/check-fork-ci.sh`.
+
 ## [2.4.0] - 2026-09-21
 
 ### Security
