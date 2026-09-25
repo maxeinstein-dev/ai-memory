@@ -66,6 +66,34 @@ Regras do `AGENTS.md` do projeto que o desenho respeita, e onde:
 Navegação: a página do projeto ganha abas **Páginas** (a atual) | **Briefing** | **Linha do tempo** |
 **Propostas**; o cabeçalho ganha **Entre projetos**. Sem JavaScript novo.
 
+## 2.1. Segurança herdada do original — requisito, não sugestão
+
+Todo requisito de segurança do `AGENTS.md` ("Security considerations") e do `SECURITY.md` do original vale
+para o fork sem exceção (decisão do usuário em 2026-09-25). Como cada peça deste trabalho os respeita:
+
+| Requisito do original | Como o fork cumpre |
+|---|---|
+| Bind só em loopback; fora dele, token + `AI_MEMORY_ALLOWED_HOSTS` | Nada muda no bind nem no guard de Host. As telas novas ficam dentro do navegador embutido, que já é montado no router `protected` (autenticação dupla) — **nunca** montar rota do painel fora dele. |
+| Sem segredo commitado; gitleaks no CI | `ci.yml` (gitleaks por commit, `cargo deny`, `cargo audit`) segue ativo no fork; `secret-scan.yml` (histórico inteiro) **habilitado** — só os workflows de publicação ficam desligados. Fixtures de teste sem token real. |
+| Sanitização é a fronteira de confiança; nada contorna o sanitizador, o backpressure do hook nem o escritor único | As telas só leem. O `occurred_at` (§4) é **metadado numérico** (RFC 3339 convertido para µs com parse estrito; inválido vira `None`), nunca texto armazenado — não contorna o sanitizador; o texto das observações continua passando por ele. O `repair` escreve pelo `WriterHandle`. |
+| Exclusões de captura (`ignore_paths`) preservadas | Não tocamos no caminho de captura; o backfill continua passando pelo mesmo endpoint do hook. |
+| Escada de autenticação; `/admin/*` só root com usuários no banco | Nenhuma rota `/admin` nova. A tela Entre projetos usa `ActorContext`/`AuthLevel` com o **mesmo** `OwnerFilter` e a **mesma** regra de redação de corpo de handoff da API (`owner_filter_for`, `serves_handoff_body`) — reuso, não cópia. |
+| Política de dependências (`cargo deny`, `cargo audit`); não adicionar dependência sem necessidade | Nenhuma dependência nova (sem crate de diff; normalização de acentos por tabela fixa). |
+| Operações destrutivas mantêm confirmação e checagem de processo vivo | `repair-backfill-timestamps`: dry-run por padrão, `--apply` explícito, checagem de processo vivo (padrão `reindex`), backup recomendado no `--help`. |
+| Conteúdo armazenado é dado não confiável (injeção de prompt) | Toda memória exibida passa por `markdown::render` (HTML embutido escapado, esquemas de link perigosos neutralizados); `|safe` só na saída dele; títulos, caminhos e markdown cru pelo escape do askama. A prévia do briefing mantém as cercas `untrusted-history` do renderer original. |
+| Isolamento por projeto | Toda consulta do painel é filtrada por `(workspace_id, project_id)`; a tela Entre projetos agrega entre projetos, mas páginas seguem o invariante 16 (compartilhadas) e handoffs seguem o `OwnerFilter`. |
+| Integridade de executável publicado | O fork não publica nada: imagem compilada localmente do código-fonte; `release.yml` desligado para não gerar artefato com o nome do original. |
+
+**Checklist de segurança de cada PR do fork** (entra no corpo do PR): rotas novas só GET e dentro do
+router protegido; nenhuma escrita fora do `WriterHandle`; nenhum texto novo armazenado sem o sanitizador;
+nenhuma dependência nova; `|safe` só em saída de `markdown::render`; handoffs com `OwnerFilter`; CI (gitleaks,
+deny, audit) verde.
+
+**Nunca verificar pelo `GET /handoff`:** ele **consome** o handoff pendente (`fetch_and_accept_handoff`,
+uso único). Em 2026-09-25 uma verificação por esse endpoint consumiu o handoff de outra sessão, que precisou
+ser recriado. A paridade prévia = hook é garantida pela função compartilhada (`build_session_brief`) e pelo
+teste; conferência ao vivo só lendo um início de sessão real, ou com `memory_handoff_list` vazio antes.
+
 ## 3. As quatro telas
 
 ### 3.1. Briefing — `/w/{workspace}/{project}/briefing`
@@ -180,9 +208,8 @@ naquela rota, sem afetar MCP, hooks ou a `/web` original.
 1. Gate da §5 verde em cada PR; CI do fork verde.
 2. Imagem `ai-memory-alfama` no compose local; `status` e `/mcp` respondendo como antes; hooks capturando
    (uma sessão nova aparece na linha do tempo).
-3. **Briefing:** o texto da tela para `aw-senai-sgw` é idêntico ao `additionalContext` que o hook de início
-   de sessão devolve para o mesmo projeto (comparação feita chamando o endpoint do hook com os mesmos
-   parâmetros).
+3. **Briefing:** o texto da tela para `aw-senai-sgw` está contido integralmente no que o hook injeta no
+   início de sessão (medido em 2026-09-25: 3.846 caracteres idênticos). **Sem** chamar `GET /handoff` (§2.1).
 4. **Linha do tempo:** depois de `repair-backfill-timestamps --apply`, as sessões do SGW se espalham pelos
    dias reais das transcrições (não mais só 2026-09-24); as páginas do SGW aparecem sob as sessões que as
    geraram.

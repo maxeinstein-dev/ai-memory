@@ -496,9 +496,10 @@ Em `C:\Users\Maxsuel Einstein\ai-memory\docker-compose.yml`, `image: ai-memory-a
 `docker compose up -d`, `status` e `/mcp` como antes, e `http://127.0.0.1:49374/web/w/default/aw-senai-sgw/briefing`
 abrindo.
 
-**Passo 5: Verificação 3 da spec** — o markdown da tela para `aw-senai-sgw` bate com o
-`additionalContext` do hook: chamar o endpoint de handoff do hook com `briefing_budget` padrão (ver
-`HandoffQuery` em `router.rs`) e comparar com o "Markdown cru" da tela.
+**Passo 5: Verificação 3 da spec** — **NÃO** chame `GET /handoff`: ele consome o handoff pendente de
+qualquer sessão (spec §2.1). Compare o "Markdown cru" da tela com o bloco de briefing de um início de sessão
+real, ou só chame o endpoint depois de `memory_handoff_list` vazio para o projeto. Feito em 2026-09-25:
+contido integralmente (3.846 caracteres).
 
 **Passo 6: PR 1 no fork** (com OK do usuário): push de `alfama/main` numa branch
 `alfama/fase-1-briefing` e PR para `alfama/main` no fork (`gh pr create -R maxeinstein-dev/ai-memory
