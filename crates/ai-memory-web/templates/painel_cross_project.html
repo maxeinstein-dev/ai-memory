@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}Entre projetos — ai-memory{% endblock %}
+
+{% block content %}
+<nav class="mb-6 flex items-center gap-1 text-sm text-slate-500 dark:text-slate-400">
+  <a href="." class="hover:text-blue-600 dark:hover:text-blue-400">home</a>
+  <span>/</span>
+  <span class="text-slate-700 dark:text-slate-200 font-medium">Entre projetos</span>
+</nav>
+
+<h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100 mb-1">Entre projetos</h1>
+<p class="text-sm text-slate-500 dark:text-slate-400 mb-8">Regras repetidas, handoffs abertos e mensagens pendentes de todos os projetos.</p>
+
+<h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">Regras candidatas a globais</h2>
+{% if rule_groups.is_empty() %}
+<p class="text-sm text-slate-400 dark:text-slate-600 mb-8">Nada aqui.</p>
+{% else %}
+<ul class="space-y-4 mb-8">
+  {% for group in rule_groups %}
+  <li class="rounded-lg border border-slate-200 dark:border-slate-800 p-4">
+    <div class="text-xs font-medium text-slate-400 dark:text-slate-500 mb-2">{{ group.workspace }}</div>
+    <ul class="space-y-1">
+      {% for member in group.members %}
+      <li class="text-sm text-slate-700 dark:text-slate-300">
+        <span class="font-medium">{{ member.project }}</span>
+        <span class="text-slate-400 dark:text-slate-500"> · </span>
+        <a href="{{ member.href }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ member.title }}</a>
+        <span class="text-xs text-slate-400 dark:text-slate-500">{{ member.path }}</span>
+      </li>
+      {% endfor %}
+    </ul>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">Handoffs abertos</h2>
+{% if open_handoffs.is_empty() %}
+<p class="text-sm text-slate-400 dark:text-slate-600 mb-8">Nada aqui.</p>
+{% else %}
+<ul class="space-y-2 mb-8">
+  {% for handoff in open_handoffs %}
+  <li class="rounded-lg border border-slate-200 dark:border-slate-800 p-3 text-sm text-slate-700 dark:text-slate-300">
+    <div>
+      <span class="font-medium">{{ handoff.agent }}</span>
+      <span class="text-slate-400 dark:text-slate-500"> → </span>
+      <a href="{{ handoff.project_href }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ handoff.workspace }}/{{ handoff.project }}</a>
+      <span class="text-xs text-slate-400 dark:text-slate-500"> · {{ handoff.age }}</span>
+    </div>
+    {% if let Some(summary) = handoff.summary %}
+    <p class="mt-1 text-slate-600 dark:text-slate-400">{{ summary }}</p>
+    {% else %}
+    <p class="mt-1 text-xs text-slate-400 dark:text-slate-600 italic">Resumo oculto — entre com uma sessão autenticada para ler.</p>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">Mensagens pendentes</h2>
+{% if pending_messages.is_empty() %}
+<p class="text-sm text-slate-400 dark:text-slate-600">Nada aqui.</p>
+{% else %}
+<ul class="space-y-2">
+  {% for message in pending_messages %}
+  <li class="rounded-lg border border-slate-200 dark:border-slate-800 p-3 text-sm text-slate-700 dark:text-slate-300">
+    <div>
+      <span class="font-medium">{{ message.from_workspace }}/{{ message.from_project }}</span>
+      <span class="text-slate-400 dark:text-slate-500"> → </span>
+      <span class="font-medium">{{ message.to_workspace }}/{{ message.to_project }}</span>
+      <span class="text-xs text-slate-400 dark:text-slate-500"> · {{ message.age }}</span>
+    </div>
+    <p class="mt-1 text-slate-600 dark:text-slate-400">{{ message.summary }}</p>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

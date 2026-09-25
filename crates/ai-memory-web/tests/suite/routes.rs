@@ -4175,3 +4175,481 @@ async fn propostas_escapa_titulo_e_justificativa_maliciosos() {
         "titulo e justificativa tem de aparecer escapados pelo askama: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// GET /entre-projetos (Tarefa 14)
+// ---------------------------------------------------------------------------
+
+/// A `_rules/` page: `page_kind_expr` infers `kind = 'rule'` for it from the
+/// path alone (frontmatter carries no explicit `kind`, unlike `new_page`,
+/// whose `{"kind": "fact"}` would otherwise win the `COALESCE` over the
+/// path-based inference) — same fixture shape as the store's own
+/// `rules_across_projects` tests (Tarefa 13, `ai-memory-store/tests/suite/painel.rs`).
+fn regra(
+    ws: ai_memory_core::WorkspaceId,
+    proj: ai_memory_core::ProjectId,
+    slug: &str,
+    title: &str,
+) -> NewPage {
+    NewPage {
+        workspace_id: ws,
+        project_id: proj,
+        path: PagePath::new(format!("_rules/{slug}.md")).unwrap(),
+        title: title.to_owned(),
+        body: "corpo da regra".to_owned(),
+        tier: Tier::Semantic,
+        frontmatter_json: serde_json::json!({}),
+        pinned: false,
+        links: Vec::new(),
+        author_id: None,
+        expires_at: None,
+        entities: Vec::new(),
+        evidence: Vec::new(),
+    }
+}
+
+fn mensagem(
+    ws: ai_memory_core::WorkspaceId,
+    from_proj: ai_memory_core::ProjectId,
+    to_proj: ai_memory_core::ProjectId,
+    body: &str,
+) -> ai_memory_core::NewAgentMessage {
+    ai_memory_core::NewAgentMessage {
+        from_workspace_id: ws,
+        from_project_id: from_proj,
+        from_agent: AgentKind::ClaudeCode,
+        from_session_id: None,
+        from_owner_user: None,
+        to_workspace_id: ws,
+        to_project_id: to_proj,
+        subject: None,
+        body: body.to_owned(),
+    }
+}
+
+/// (a) Two equivalent rule pages in two different projects of the same
+/// workspace group together (`group_rules`'s no-vector fallback: equal
+/// normalized titles), and the group lists both projects.
+#[tokio::test]
+async fn entre_projetos_agrupa_regras_equivalentes_de_dois_projetos() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj_a = store
+        .writer
+        .get_or_create_project(ws, "proj-a", None)
+        .await
+        .unwrap();
+    let proj_b = store
+        .writer
+        .get_or_create_project(ws, "proj-b", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(regra(ws, proj_a, "estilo", "Sempre usar TDD"))
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(regra(ws, proj_b, "estilo", "Sempre usar TDD"))
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/entre-projetos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("proj-a"), "grupo nao lista proj-a: {text}");
+    assert!(text.contains("proj-b"), "grupo nao lista proj-b: {text}");
+    assert!(
+        text.contains("Sempre usar TDD"),
+        "titulo da regra ausente: {text}"
+    );
+    assert!(
+        !text.contains("Nada aqui.") || text.matches("Nada aqui.").count() == 2,
+        "com um grupo de regras, so handoffs e mensagens ficam vazios: {text}"
+    );
+}
+
+/// (b) An open handoff appears on the screen; an accepted one, in the same
+/// project, does not.
+#[tokio::test]
+async fn entre_projetos_lista_handoff_aberto_mas_nao_o_aceito() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .insert_handoff(handoff_for(ws, proj, "open_handoff_marker", None))
+        .await
+        .unwrap();
+    let accepted_id = store
+        .writer
+        .insert_handoff(handoff_for(ws, proj, "accepted_handoff_marker", None))
+        .await
+        .unwrap();
+    let claimed = store
+        .writer
+        .accept_handoff(ai_memory_core::HandoffAcceptance {
+            handoff_id: accepted_id,
+            workspace_id: ws,
+            project_id: proj,
+            accepting_agent: AgentKind::ClaudeCode,
+            accepting_session: None,
+            accepting_user: None,
+            owner_filter: ai_memory_core::OwnerFilter::Unattributed,
+            receiving_cwd: None,
+        })
+        .await
+        .unwrap();
+    assert!(claimed, "setup: accept_handoff should have claimed the row");
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/entre-projetos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("open_handoff_marker"),
+        "handoff aberto nao aparece: {text}"
+    );
+    assert!(
+        !text.contains("accepted_handoff_marker"),
+        "handoff aceito nao pode aparecer entre os abertos: {text}"
+    );
+}
+
+/// (c) ADVERSARIAL: a handoff owned by another operator does not appear for
+/// an authenticated actor. Control: the actor's own handoff appears. Same
+/// `OwnerFilter`/actor-context pattern the API's handoff tests use
+/// (`api_handoff_listing_serves_an_oidc_proxy_caller_their_own_rows`).
+///
+/// Bite-checked manually: with `owner_filter_for(actor)` in
+/// `painel_cross_project::handler` temporarily replaced by
+/// `ai_memory_core::OwnerFilter::Any`, this test failed (both markers
+/// present); reverted immediately after confirming the failure.
+#[tokio::test]
+async fn entre_projetos_nao_vaza_handoff_de_outro_dono() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    for (summary, owner) in [
+        ("mine_handoff_marker", Some(user_key("alice"))),
+        ("theirs_handoff_marker", Some(user_key("bob"))),
+    ] {
+        store
+            .writer
+            .insert_handoff(handoff_for(ws, proj, summary, owner.as_ref()))
+            .await
+            .unwrap();
+    }
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let req = Request::builder()
+        .uri("/entre-projetos")
+        .extension(ai_memory_core::ActorContext {
+            user: Some("alice".into()),
+            ..ai_memory_core::ActorContext::default()
+        })
+        .extension(ai_memory_core::AuthLevel::User)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("mine_handoff_marker"),
+        "controle: o proprio handoff do ator deve aparecer: {text}"
+    );
+    assert!(
+        !text.contains("theirs_handoff_marker"),
+        "handoff de outro dono vazou para o ator: {text}"
+    );
+}
+
+/// A handoff whose body this caller may not read (the `Unattributed` +
+/// `AuthLevel::User` fail-safe combo `serves_handoff_body` documents) shows
+/// the "hidden" placeholder, never the summary text.
+#[tokio::test]
+async fn entre_projetos_oculta_resumo_quando_o_ator_nao_pode_ler_o_corpo() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .insert_handoff(handoff_for(ws, proj, "corpo_oculto_marker", None))
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let req = Request::builder()
+        .uri("/entre-projetos")
+        .extension(ai_memory_core::AuthLevel::User)
+        .body(Body::empty())
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !text.contains("corpo_oculto_marker"),
+        "resumo redigido nao pode aparecer no HTML: {text}"
+    );
+    assert!(
+        text.contains("Resumo oculto"),
+        "falta o aviso de resumo oculto: {text}"
+    );
+}
+
+/// (d) A pending message appears with origin -> destination.
+#[tokio::test]
+async fn entre_projetos_lista_mensagem_pendente_origem_destino() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let sender = store
+        .writer
+        .get_or_create_project(ws, "sender", None)
+        .await
+        .unwrap();
+    let recipient = store
+        .writer
+        .get_or_create_project(ws, "recipient", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .insert_message(mensagem(ws, sender, recipient, "please_review_marker"))
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/entre-projetos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("sender"), "origem ausente: {text}");
+    assert!(text.contains("recipient"), "destino ausente: {text}");
+    assert!(
+        text.contains("please_review_marker"),
+        "corpo da mensagem ausente: {text}"
+    );
+}
+
+/// Passo 5 ADVERSARIAL for messages: `ReaderPool::list_messages` has no
+/// owner/actor parameter at all — it is documented as scoped strictly by
+/// mailbox coordinate (`to_workspace_id`/`to_project_id`), and
+/// `AgentMessage::origin.from_owner_user` is documented as "Attribution/
+/// provenance only — never a read filter"
+/// (`crates/ai-memory-core/src/message.rs`). Messages are project-shared by
+/// design (invariant 16), not actor-scoped like handoffs, so there is no
+/// per-actor rule to test. What the screen must still get right is
+/// PROJECT scoping: a pending message addressed to one project must not be
+/// attributed to, or leak under, an unrelated project that has nothing
+/// pending. Control: the message appears under its real recipient
+/// (`entre_projetos_lista_mensagem_pendente_origem_destino` above);
+/// adversarial half here: an unrelated third project with no messages,
+/// handoffs, or rules does not appear on the page AT ALL.
+///
+/// Bite-checked manually: with the destination project id in
+/// `collect_handoffs_and_messages` temporarily hardcoded to the message's
+/// real recipient for every iteration of the projects loop, this test still
+/// passed (as expected, since it only has one recipient) — the meaningful
+/// bite check is negative: swapping `MessageBox::Inbox` for `MessageBox::Outbox`
+/// in the handler made `entre_projetos_lista_mensagem_pendente_origem_destino`
+/// fail instead (the message stopped appearing, since `sender`'s outbox is
+/// what changed side), confirming the mailbox-side scoping this test relies
+/// on is actually exercised. Reverted immediately after.
+#[tokio::test]
+async fn entre_projetos_mensagem_pendente_nao_vaza_para_projeto_sem_mensagem() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let sender = store
+        .writer
+        .get_or_create_project(ws, "sender", None)
+        .await
+        .unwrap();
+    let recipient_a = store
+        .writer
+        .get_or_create_project(ws, "recipient-a", None)
+        .await
+        .unwrap();
+    let _recipient_b = store
+        .writer
+        .get_or_create_project(ws, "recipient-b", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .insert_message(mensagem(ws, sender, recipient_a, "for_a_marker"))
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/entre-projetos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("for_a_marker"),
+        "controle: mensagem ausente: {text}"
+    );
+    assert!(
+        text.contains("recipient-a"),
+        "controle: destino real ausente: {text}"
+    );
+    assert!(
+        !text.contains("recipient-b"),
+        "projeto sem nada pendente nao deveria aparecer na tela: {text}"
+    );
+}
+
+/// `<script>` in a rule title, a handoff summary, and a message body must
+/// all render HTML-escaped, never as `|safe` markup — same discipline as
+/// `propostas_escapa_titulo_e_justificativa_maliciosos`.
+#[tokio::test]
+async fn entre_projetos_escapa_conteudo_malicioso() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj_a = store
+        .writer
+        .get_or_create_project(ws, "proj-a", None)
+        .await
+        .unwrap();
+    let proj_b = store
+        .writer
+        .get_or_create_project(ws, "proj-b", None)
+        .await
+        .unwrap();
+
+    let xss = "<script>alert(1)</script>";
+    store
+        .writer
+        .upsert_page(regra(ws, proj_a, "x", xss))
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(regra(ws, proj_b, "x", xss))
+        .await
+        .unwrap();
+    store
+        .writer
+        .insert_handoff(handoff_for(ws, proj_a, xss, None))
+        .await
+        .unwrap();
+    store
+        .writer
+        .insert_message(mensagem(ws, proj_a, proj_b, xss))
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/entre-projetos")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !text.contains(xss),
+        "conteudo malicioso nao pode aparecer sem escape: {text}"
+    );
+    assert!(
+        text.matches("&lt;script&gt;").count() >= 3,
+        "regra, handoff e mensagem devem aparecer escapados pelo askama: {text}"
+    );
+}

@@ -94,6 +94,43 @@ pub(crate) fn humanize(iso: &str) -> String {
     format!("{years} year{} ago", if years == 1 { "" } else { "s" })
 }
 
+/// Portuguese counterpart of [`humanize`] for the fork's panel screens, whose
+/// UI text is Portuguese; upstream's screens keep the English [`humanize`].
+#[must_use]
+pub(crate) fn humanize_pt(iso: &str) -> String {
+    let Ok(then) = iso.parse::<jiff::Timestamp>() else {
+        return iso.to_owned();
+    };
+    let secs = (jiff::Timestamp::now().as_microsecond() - then.as_microsecond()).abs() / 1_000_000;
+    let plural = |n: i64, one: &str, many: &str| {
+        if n == 1 {
+            format!("há 1 {one}")
+        } else {
+            format!("há {n} {many}")
+        }
+    };
+    if secs < 60 {
+        return "agora mesmo".to_owned();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return plural(mins, "minuto", "minutos");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return plural(hours, "hora", "horas");
+    }
+    let days = hours / 24;
+    if days < 30 {
+        return plural(days, "dia", "dias");
+    }
+    let months = days / 30;
+    if months < 12 {
+        return plural(months, "mês", "meses");
+    }
+    plural(months / 12, "ano", "anos")
+}
+
 // ---------------------------------------------------------------------------
 // projects.html
 // ---------------------------------------------------------------------------
@@ -389,6 +426,83 @@ pub(crate) struct NamespaceView {
     pub namespace: String,
     /// Pages under this namespace.
     pub pages: Vec<PageRow>,
+}
+
+// ---------------------------------------------------------------------------
+// painel_cross_project.html
+// ---------------------------------------------------------------------------
+
+/// One rule page inside a [`RuleGroupRow`], ready for the template.
+pub(crate) struct RuleMemberRow {
+    /// Owning project's name.
+    pub project: String,
+    /// Rule title (untrusted — page content).
+    pub title: String,
+    /// Wiki path of the rule page.
+    pub path: String,
+    /// Link target for this page, built through `page_href`.
+    pub href: String,
+}
+
+/// A set of rule pages from at least two projects of the same workspace
+/// judged to say the same thing ([`ai_memory_store::group_rules`]).
+pub(crate) struct RuleGroupRow {
+    /// Owning workspace's name (grouping never crosses workspaces).
+    pub workspace: String,
+    /// Member rules, sorted by `(project, path)` (inherited from `group_rules`).
+    pub members: Vec<RuleMemberRow>,
+}
+
+/// One open handoff on the cross-project screen.
+pub(crate) struct OpenHandoffRow {
+    /// Owning workspace's name.
+    pub workspace: String,
+    /// Owning project's name (handoff destination).
+    pub project: String,
+    /// Link target for the owning project.
+    pub project_href: String,
+    /// Agent CLI that composed it.
+    pub agent: String,
+    /// Prompt-derived summary, withheld exactly like the JSON API withholds
+    /// it (`serves_handoff_body`) — `None` when this caller may not read it,
+    /// which the template renders as a "hidden, sign in to read" note.
+    pub summary: Option<String>,
+    /// Humanised age (e.g. "3 hours ago").
+    pub age: String,
+}
+
+/// One pending cross-project message on the cross-project screen. Messages
+/// carry no owner filter (see `painel_cross_project::collect_handoffs_and_messages`
+/// doc comment) — every pending message addressed to a listed project is
+/// shown regardless of the requesting actor.
+pub(crate) struct PendingMessageRow {
+    /// Sender workspace's name.
+    pub from_workspace: String,
+    /// Sender project's name.
+    pub from_project: String,
+    /// Recipient workspace's name.
+    pub to_workspace: String,
+    /// Recipient project's name.
+    pub to_project: String,
+    /// Subject when present and non-blank, else the message body
+    /// (untrusted — composed by another project's agent; escaped by askama,
+    /// never rendered as markdown or HTML).
+    pub summary: String,
+    /// Humanised age (e.g. "3 hours ago").
+    pub age: String,
+}
+
+/// View-model for `GET /entre-projetos`.
+#[derive(Template)]
+#[template(path = "painel_cross_project.html")]
+pub(crate) struct CrossProjectView {
+    /// Rule groups spanning two or more projects, across every workspace.
+    pub rule_groups: Vec<RuleGroupRow>,
+    /// Open handoffs across every project the home page lists, scoped by the
+    /// requesting actor's `OwnerFilter`.
+    pub open_handoffs: Vec<OpenHandoffRow>,
+    /// Pending cross-project messages across every project's inbox.
+    pub pending_messages: Vec<PendingMessageRow>,
 }
 
 // ---------------------------------------------------------------------------

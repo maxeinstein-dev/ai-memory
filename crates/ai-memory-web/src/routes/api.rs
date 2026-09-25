@@ -556,7 +556,7 @@ async fn overview_handler(
 /// may leave `user` empty, and reading `user` here would file that operator as
 /// unattributed while the auth layer calls them a user — hiding their own
 /// handoffs, and the bodies of the shared ones, from them in their own UI.
-fn owner_filter_for(
+pub(crate) fn owner_filter_for(
     actor: Option<axum::Extension<ai_memory_core::ActorContext>>,
 ) -> ai_memory_core::OwnerFilter {
     ai_memory_core::OwnerFilter::for_actor_context(
@@ -605,7 +605,7 @@ fn owner_filter_for(
 /// rung, or a mount that injects a tier without an actor, redacts by default
 /// instead of leaking. Weakening the arm because "nothing produces it" removes
 /// the fail-safe, not dead code.
-fn serves_handoff_body(
+pub(crate) fn serves_handoff_body(
     owner_filter: &ai_memory_core::OwnerFilter,
     auth: Option<axum::Extension<ai_memory_core::AuthLevel>>,
 ) -> bool {

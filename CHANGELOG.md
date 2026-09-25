@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   selectable text — the web never approves or rejects. Read-only, GET-only,
   inside the existing protected `/web` router — no new authentication
   surface. (#4)
+- (fork alfama) A top-level `/web/entre-projetos` screen listing rule pages
+  that look the same across two or more projects of the same workspace
+  (grouped by embedding cosine similarity ≥ 0.85, falling back to normalized
+  title), currently open handoffs, and pending cross-project messages, each
+  with a link back to its project. Handoffs reuse the exact `OwnerFilter` and
+  body-redaction rule the JSON API applies — an actor sees only their own
+  open handoffs plus the shared ones, and reads a summary only when the API
+  would let them. Read-only, GET-only, inside the existing protected `/web`
+  router — no new authentication surface. (#6)
 
 ### Changed
 - (fork alfama) The session-briefing renderer (`render_session_brief` and its

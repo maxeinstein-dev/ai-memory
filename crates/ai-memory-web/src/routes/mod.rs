@@ -13,10 +13,11 @@ use axum::routing::get;
 use crate::state::WebState;
 use crate::templates::NotFoundView;
 
-mod api;
+pub(crate) mod api;
 mod index;
 mod page;
 pub(crate) mod painel_briefing;
+pub(crate) mod painel_cross_project;
 pub(crate) mod painel_proposals;
 pub(crate) mod painel_timeline;
 mod project;
@@ -72,6 +73,7 @@ pub(crate) fn build(state: Arc<WebState>) -> Router {
             "/w/{workspace}/{project}/propostas",
             get(painel_proposals::handler),
         )
+        .route("/entre-projetos", get(painel_cross_project::handler))
         .route("/search", get(search::handler))
         .route("/static/tailwind.css", get(statics::tailwind_css))
         .route("/static/logo.png", get(statics::logo))
