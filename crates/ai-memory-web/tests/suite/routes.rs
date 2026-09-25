@@ -3452,3 +3452,219 @@ async fn briefing_clampa_max_chars_como_o_servidor() {
         "orçamento mínimo não apareceu"
     );
 }
+
+/// (a) A project with one seeded session shows 200, with the agent and the
+/// session's UTC day both in the HTML.
+#[tokio::test]
+async fn linha_do_tempo_mostra_a_sessao_semeada() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    seed_session(&store, ws, proj, true, &[]).await;
+
+    let today = jiff::Timestamp::now().strftime("%Y-%m-%d").to_string();
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/linha-do-tempo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("open-code"), "falta o agente: {text}");
+    assert!(text.contains(&today), "falta a data do dia: {text}");
+}
+
+/// (b) `?dias=7` and `?dias=90` are accepted as-is; `?dias=5` (not one of
+/// `{7, 30, 90}`) falls back to the default of 30.
+#[tokio::test]
+async fn linha_do_tempo_aceita_7_e_90_e_cai_no_padrao_para_outros_valores() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let _ = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+
+    for (query, esperado) in [
+        ("?dias=7", "últimos 7 dias"),
+        ("?dias=90", "últimos 90 dias"),
+        ("?dias=5", "últimos 30 dias"),
+        ("?dias=abc", "últimos 30 dias"),
+        ("", "últimos 30 dias"),
+    ] {
+        let app = router(store.reader.clone(), wiki.clone());
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/w/default/scratch/linha-do-tempo{query}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let text = std::str::from_utf8(&body).unwrap().to_owned();
+        assert!(
+            text.contains(esperado),
+            "query {query:?} devia mostrar {esperado:?}: {text}"
+        );
+    }
+}
+
+/// (c) An unknown project answers the HTML 404 page, same as the briefing
+/// screen.
+#[tokio::test]
+async fn linha_do_tempo_de_projeto_inexistente_responde_404() {
+    let (_tmp, store, wiki) = setup().await;
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/nao-existe/linha-do-tempo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// (d) ADVERSARIAL: the route is another bare `(workspace, project)` entry
+/// point — guilty until a test proves it refuses a foreign workspace (per
+/// `docs/security-boundaries.md`'s standing protocol). A project that
+/// exists, but under a DIFFERENT workspace than the one named in the URL,
+/// must 404 exactly like an unknown project (control: the very same project
+/// under its real workspace answers 200). This bit when `escopo_html`'s
+/// `lookup_existing_scope` call was temporarily swapped for a
+/// project-only resolution that ignored the workspace argument — confirmed
+/// by hand, then reverted (`ai-memory-store/src/scope.rs` untouched here).
+#[tokio::test]
+async fn linha_do_tempo_recusa_projeto_de_outro_workspace() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws_a = store
+        .writer
+        .get_or_create_workspace("workspace-a")
+        .await
+        .unwrap();
+    let _ws_b = store
+        .writer
+        .get_or_create_workspace("workspace-b")
+        .await
+        .unwrap();
+    let _ = store
+        .writer
+        .get_or_create_project(ws_a, "scratch", None)
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let cruzado = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/workspace-b/scratch/linha-do-tempo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cruzado.status(),
+        StatusCode::NOT_FOUND,
+        "projeto de outro workspace nao pode responder 200"
+    );
+
+    // Control: the same project name, under its real workspace, is fine —
+    // proves the 404 above is the scope guard, not the project name itself.
+    let app = router(store.reader.clone(), wiki.clone());
+    let legitimo = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/workspace-a/scratch/linha-do-tempo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legitimo.status(), StatusCode::OK);
+}
+
+/// (e) A produced page's title is untrusted content (LLM-consolidated text)
+/// and must render HTML-escaped, never as `|safe` markup.
+#[tokio::test]
+async fn linha_do_tempo_escapa_titulo_malicioso_de_pagina_produzida() {
+    use ai_memory_core::{PageEvidence, PageEvidenceKind};
+
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    let sid = seed_session(&store, ws, proj, true, &[]).await;
+
+    let mut page = new_page(
+        ws,
+        proj,
+        "gotchas/x.md",
+        "<script>alert(1)</script>",
+        "corpo",
+    );
+    page.evidence = vec![PageEvidence {
+        kind: PageEvidenceKind::Session,
+        source_id: sid.to_string(),
+    }];
+    store.writer.upsert_page(page).await.unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/linha-do-tempo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !text.contains("<script>alert(1)</script>"),
+        "o titulo malicioso nao pode aparecer sem escape: {text}"
+    );
+    assert!(
+        text.contains("&lt;script&gt;"),
+        "o titulo malicioso tem de aparecer escapado pelo askama: {text}"
+    );
+}

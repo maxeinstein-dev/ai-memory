@@ -14,6 +14,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against the budget, plus the new tab strip (Páginas/Briefing/Linha do
   tempo/Propostas) on the project page. Read-only, GET-only, inside the
   existing protected `/web` router — no new authentication surface. (#1)
+- (fork alfama) A `/web` Linha do tempo tab, at
+  `/web/w/{workspace}/{project}/linha-do-tempo?dias=30`, showing sessions
+  grouped by UTC day (a bar chart plus a per-day list with agent, duration,
+  and observation count) and the current pages each session produced or
+  reaffirmed, with links to them. `dias` accepts 7/30/90 (default 30).
+  Read-only, GET-only, inside the existing protected `/web` router — no new
+  authentication surface. (#3)
 
 ### Changed
 - (fork alfama) The session-briefing renderer (`render_session_brief` and its
