@@ -24,7 +24,7 @@
     {% else %}
     <ul class="space-y-1">
       {% for folder in folders %}
-      <li>
+      <li id="pasta-{{ folder.name }}">
         <div class="text-xs font-medium text-slate-500 dark:text-slate-400 py-1 border-b border-slate-100 dark:border-slate-800 mb-1">{{ folder.name }}/</div>
         <ul class="space-y-0.5 pl-2">
           {% for page in folder.pages %}
@@ -45,7 +45,7 @@
       <summary class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 cursor-pointer select-none">System</summary>
       <ul class="space-y-1 mt-3">
         {% for folder in system %}
-        <li>
+        <li id="pasta-{{ folder.name }}">
           <div class="text-xs font-medium text-slate-500 dark:text-slate-400 py-1 border-b border-slate-100 dark:border-slate-800 mb-1">{{ folder.name }}/</div>
           <ul class="space-y-0.5 pl-2">
             {% for page in folder.pages %}

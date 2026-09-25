@@ -8,12 +8,13 @@
 //! teammate's machine without `docker exec cat …`.
 //!
 //! Routes (all under whatever prefix the host nests this router at):
-//! - `GET /`                              → project list (cards)
-//! - `GET /w/:workspace/:project`         → page tree + recent activity
-//! - `GET /w/:workspace/:project/p/*path` → rendered markdown + metadata
-//! - `GET /w/:workspace/:project/briefing` → session-start brief preview
-//! - `GET /search?q=…`                    → FTS5 hit list
-//! - `GET /static/*`                      → embedded CSS + logo
+//! - `GET /`                                → project list (cards)
+//! - `GET /w/:workspace/:project`           → project overview (Visão geral)
+//! - `GET /w/:workspace/:project/paginas`   → page tree + recent activity
+//! - `GET /w/:workspace/:project/p/*path`   → rendered markdown + metadata
+//! - `GET /w/:workspace/:project/briefing`  → session-start brief preview
+//! - `GET /search?q=…`                      → FTS5 hit list
+//! - `GET /static/*`                        → embedded CSS + logo
 //!
 //! The companion `api_router` exposes the same read-only data as JSON
 //! for custom frontends. It intentionally does not expose write/admin

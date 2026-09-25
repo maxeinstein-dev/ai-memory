@@ -1,4 +1,6 @@
-//! `GET /w/:workspace/:project` — page tree + recent activity.
+//! `GET /w/:workspace/:project/paginas` — page tree + recent activity. The
+//! bare `/w/:workspace/:project` is the project overview
+//! (`painel_overview::handler`); this screen is the "Páginas" tab.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -13,7 +15,7 @@ use ai_memory_store::is_system_page;
 use crate::state::WebState;
 use crate::templates::{Folder, PageRow, ProjectView, humanize, page_href, project_href};
 
-/// Handler for `GET /w/:workspace/:project`.
+/// Handler for `GET /w/:workspace/:project/paginas`.
 pub(crate) async fn handler(
     State(state): State<Arc<WebState>>,
     Path((workspace, project)): Path<(String, String)>,

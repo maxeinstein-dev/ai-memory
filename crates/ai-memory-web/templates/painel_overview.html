@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}{{ workspace }}/{{ project }} — ai-memory{% endblock %}
+
+{% block content %}
+<nav class="mb-6 flex items-center gap-1 text-sm text-slate-500 dark:text-slate-400">
+  <a href="." class="hover:text-blue-600 dark:hover:text-blue-400">home</a>
+  <span>/</span>
+  <span class="text-slate-400 dark:text-slate-500">{{ workspace }}</span>
+  <span>/</span>
+  <span class="text-slate-700 dark:text-slate-200 font-medium">{{ project }}</span>
+</nav>
+
+<h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100 mb-6">{{ workspace }}/{{ project }}</h1>
+
+{% include "_abas.html" %}
+
+<h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">Em números</h2>
+<ul class="flex flex-wrap gap-x-6 gap-y-2 mb-2 text-sm text-slate-700 dark:text-slate-300">
+  {% for kc in kind_counts %}
+  <li><a href="{{ kc.href }}" class="hover:text-blue-600 dark:hover:text-blue-400">{{ kc.label }}</a></li>
+  {% endfor %}
+</ul>
+{% if let Some(period) = period %}
+<p class="text-xs text-slate-500 dark:text-slate-400 mb-8">Período coberto: {{ period.first }} → {{ period.last }} (datas em UTC, da primeira à última sessão).</p>
+{% else %}
+<p class="text-xs text-slate-500 dark:text-slate-400 mb-8">Nenhuma sessão registrada ainda.</p>
+{% endif %}
+
+<h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">Últimas grandes mudanças</h2>
+{% if weeks.is_empty() %}
+<p class="text-sm text-slate-400 dark:text-slate-600 mb-8">Nada aqui ainda.</p>
+{% else %}
+<ul class="space-y-5 mb-8">
+  {% for week in weeks %}
+  <li class="border-b border-slate-100 dark:border-slate-800 pb-4">
+    <div class="text-sm font-semibold text-slate-800 dark:text-slate-100">
+      Semana de {{ week.start_date }}
+      <span class="font-normal text-slate-500 dark:text-slate-400">· {{ week.sessions_label }}</span>
+    </div>
+    {% if !week.new_decisions.is_empty() %}
+    <p class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mt-3">Decisões novas</p>
+    <ul class="list-disc pl-5 text-sm text-slate-700 dark:text-slate-300 space-y-0.5">
+      {% for p in week.new_decisions %}
+      <li><a href="{{ p.href }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ p.title }}</a></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if !week.new_or_updated_concepts.is_empty() %}
+    <p class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mt-3">Conceitos novos ou atualizados</p>
+    <ul class="list-disc pl-5 text-sm text-slate-700 dark:text-slate-300 space-y-0.5">
+      {% for p in week.new_or_updated_concepts %}
+      <li><a href="{{ p.href }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ p.title }}</a></li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    {% if let Some(top) = week.top_session %}
+    <p class="text-xs text-slate-500 dark:text-slate-400 mt-3">Sessão que mais produziu: <span class="font-medium text-slate-700 dark:text-slate-300">{{ top.agent }}</span> · {{ top.pages_label }}</p>
+    {% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">Decisões recentes</h2>
+{% if recent_decisions.is_empty() %}
+<p class="text-sm text-slate-400 dark:text-slate-600 mb-8">Nada aqui ainda.</p>
+{% else %}
+<ul class="divide-y divide-slate-100 dark:divide-slate-800 mb-8">
+  {% for p in recent_decisions %}
+  <li class="py-2">
+    <div class="flex items-baseline gap-2">
+      <a href="{{ p.href }}" class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline">{{ p.title }}</a>
+      {% if let Some(date) = p.date %}<span class="text-xs text-slate-400 dark:text-slate-500 shrink-0">{{ date }}</span>{% endif %}
+    </div>
+    {% if let Some(summary) = p.summary %}<p class="text-xs text-slate-600 dark:text-slate-400 mt-0.5">{{ summary }}</p>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">{{ core_title }}</h2>
+{% if core_pages.is_empty() %}
+<p class="text-sm text-slate-400 dark:text-slate-600 mb-8">Nada aqui ainda.</p>
+{% else %}
+<ul class="space-y-1 text-sm text-slate-700 dark:text-slate-300 mb-8">
+  {% for p in core_pages %}
+  <li>
+    <a href="{{ p.href }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ p.title }}</a>
+    {% if core_show_kind %}<span class="text-xs text-slate-400 dark:text-slate-500">{{ p.kind }}</span>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">Gotchas recentes</h2>
+{% if recent_gotchas.is_empty() %}
+<p class="text-sm text-slate-400 dark:text-slate-600 mb-8">Nada aqui ainda.</p>
+{% else %}
+<ul class="divide-y divide-slate-100 dark:divide-slate-800 mb-8">
+  {% for p in recent_gotchas %}
+  <li class="py-2">
+    <div class="flex items-baseline gap-2">
+      <a href="{{ p.href }}" class="text-sm font-medium text-blue-600 dark:text-blue-400 hover:underline">{{ p.title }}</a>
+      {% if let Some(date) = p.date %}<span class="text-xs text-slate-400 dark:text-slate-500 shrink-0">{{ date }}</span>{% endif %}
+    </div>
+    {% if let Some(summary) = p.summary %}<p class="text-xs text-slate-600 dark:text-slate-400 mt-0.5">{{ summary }}</p>{% endif %}
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+<h2 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-3">Sem data de origem</h2>
+{% if missing_origin.is_empty() %}
+<p class="text-sm text-slate-400 dark:text-slate-600">Nada aqui ainda.</p>
+{% else %}
+<ul class="flex flex-wrap gap-x-6 gap-y-2 text-sm text-slate-700 dark:text-slate-300">
+  {% for m in missing_origin %}
+  <li><a href="{{ m.href }}" class="hover:text-blue-600 dark:hover:text-blue-400">{{ m.label }}</a></li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

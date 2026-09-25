@@ -41,6 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open handoffs plus the shared ones, and reads a summary only when the API
   would let them. Read-only, GET-only, inside the existing protected `/web`
   router — no new authentication surface. (#6)
+- (fork alfama) A `/web` Visão geral tab, at `/web/w/{workspace}/{project}`
+  (now the project's entry point), summarizing what a project decided,
+  learned, and changed: a count per page kind plus the session count and the
+  period covered ("Em números"); the most recent active ISO weeks with their
+  new decisions, new/updated concepts, and top-producing session ("Últimas
+  grandes mudanças"); the 10 most recent decisions and gotchas by origin
+  date, each with a one-line summary; the briefing's core pages ("Conceitos
+  centrais"); and a count per kind of pages with no session evidence at all
+  ("Sem data de origem"). A page's origin date is the start of its earliest
+  evidence session, never `created_at`/`updated_at` (the date the page was
+  generated, not the date of the knowledge). Read-only, GET-only, inside the
+  existing protected `/web` router — no new authentication surface. (#7)
 
 ### Changed
 - (fork alfama) The session-briefing renderer (`render_session_brief` and its
@@ -57,6 +69,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `release-build`). A new fork-only workflow, `alfama-guard.yml`, fails any
   PR whose `ci.yml` drops `alfama/main` from `on.push.branches` (the line a
   rebase onto upstream would lose), via `scripts/alfama/check-fork-ci.sh`. (#2)
+- (fork alfama) `/web/w/{workspace}/{project}` now opens on the new Visão
+  geral tab instead of the page tree; the page tree moved, unchanged, to
+  `/web/w/{workspace}/{project}/paginas` (a new "Páginas" tab). The Linha do
+  tempo's per-day bars are now labelled by extenso (`"8 sessões"`, singular
+  `"1 sessão"`) with a legend above them, plus, alongside each label, what
+  the day produced by page kind (`"3 decisões · 5 gotchas · 1 conceito"`,
+  zeros omitted) — counted on each page's origin date, the same rule the
+  Visão geral tab uses. (#7)
 
 ### Fixed
 - (fork alfama) `backfill` now stores each imported session's and
