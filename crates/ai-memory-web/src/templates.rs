@@ -300,6 +300,79 @@ pub(crate) struct TimelineView {
     pub days: Vec<TimelineDay>,
 }
 
+// ---------------------------------------------------------------------------
+// painel_proposals.html
+// ---------------------------------------------------------------------------
+
+/// One evidence quote cited by a proposal, ready for the template.
+pub(crate) struct EvidenceRow {
+    /// Source label the reviewer cited (e.g. `sessions/<id>.md`), escaped
+    /// by askama like any other untrusted text.
+    pub page: String,
+    /// The quoted excerpt, escaped by askama.
+    pub quote: String,
+    /// Link target when `page` names a session capture, built through
+    /// `page_href` (percent-encoded) — `None` otherwise, so the template
+    /// never interpolates raw text into an `href`.
+    pub href: Option<String>,
+}
+
+/// One pending (or otherwise filtered) auto-improvement proposal, ready for
+/// the template. The web never approves or rejects; `approve_cmd`/
+/// `reject_cmd` are the exact CLI commands shown as selectable text.
+pub(crate) struct ProposalCard {
+    /// Proposal id, as its canonical string form.
+    pub id: String,
+    /// Human-readable proposal title (untrusted — reviewer/LLM output).
+    pub title: String,
+    /// Proposal category for telemetry (e.g. `learning`).
+    pub kind: String,
+    /// `"create"` or `"update"`.
+    pub operation: &'static str,
+    /// Wiki path of the targeted page.
+    pub target_path: String,
+    /// Reviewer confidence as a rounded percentage (`0..=100`).
+    pub confidence_pct: i64,
+    /// Whether the target page changed since staging (`update` only —
+    /// `sha256(current body) != target_body_sha256_at_stage`, or the page
+    /// vanished entirely).
+    pub conflict: bool,
+    /// Why the reviewer proposes this edit (untrusted).
+    pub rationale: String,
+    /// Supporting evidence, with session links resolved.
+    pub evidence: Vec<EvidenceRow>,
+    /// Current body of the target page, for `update` proposals — `None`
+    /// for `create` (nothing to show) and for a vanished target.
+    pub before: Option<String>,
+    /// Full proposed page body (raw markdown, escaped by askama — no
+    /// markdown rendering here, so no new `|safe` surface).
+    pub after: String,
+    /// Exact, selectable `ai-memory pending-writes approve <ID>` command.
+    pub approve_cmd: String,
+    /// Exact, selectable `ai-memory pending-writes reject <ID>` command.
+    pub reject_cmd: String,
+}
+
+/// View-model for `GET /w/:workspace/:project/propostas`.
+#[derive(Template)]
+#[template(path = "painel_proposals.html")]
+pub(crate) struct ProposalsView {
+    /// Workspace name.
+    pub workspace: String,
+    /// Project name.
+    pub project: String,
+    /// Link target for this project, used by `_abas.html`.
+    pub base_href: String,
+    /// Active panel-tab for `_abas.html`.
+    pub aba: &'static str,
+    /// Effective `?status=` filter (`pending`, `approved`, `rejected`,
+    /// `conflict`, or `failed` — never anything else).
+    pub status: &'static str,
+    /// Proposals matching `status`, most recently staged first (inherited
+    /// from the store's ordering).
+    pub proposals: Vec<ProposalCard>,
+}
+
 /// View-model for a namespace (directory) listing — `GET
 /// /w/:workspace/:project/p/:namespace/` when the path names a namespace
 /// rather than a page (#603).

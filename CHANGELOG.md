@@ -21,6 +21,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reaffirmed, with links to them. `dias` accepts 7/30/90 (default 30).
   Read-only, GET-only, inside the existing protected `/web` router — no new
   authentication surface. (#3)
+- (fork alfama) A `/web` Propostas tab, at
+  `/web/w/{workspace}/{project}/propostas?status=pending`, listing pending
+  (or `approved`/`rejected`/`conflict`/`failed`, via `?status=`)
+  auto-improvement proposals with title, kind, operation, target path,
+  confidence, justification, evidence (linked to the cited session when one
+  is named), and the proposed body against the current one side by side.
+  Flags a conflict when the target page changed since staging. Shows the
+  exact `ai-memory pending-writes approve|reject <ID>` commands as
+  selectable text — the web never approves or rejects. Read-only, GET-only,
+  inside the existing protected `/web` router — no new authentication
+  surface. (#4)
 
 ### Changed
 - (fork alfama) The session-briefing renderer (`render_session_brief` and its

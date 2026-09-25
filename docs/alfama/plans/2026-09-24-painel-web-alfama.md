@@ -491,6 +491,30 @@ MSYS_NO_PATHCONV=1 docker run --rm --user 1000:1000 -e HOME=/tmp/h \
 
 e commitar `crates/ai-memory-web/static/tailwind.css`. Conferir `git diff --stat` (só o CSS muda).
 
+**Nota (bind mount do Windows, confirmada em 2026-09-25 na Tarefa 8):** o comando acima falha nesta
+árvore — o `build.rs` tenta um `std::fs::copy` de volta para `static/tailwind.css` e o bind mount do
+Windows recusa copiar permissões (`PermissionDenied: Operation not permitted`), deixando o arquivo
+**vazio**. O CSS novo, porém, já foi gerado no `OUT_DIR` do build antes da cópia falhar. Contorno: rodar o
+build (que falha, sem problema) e depois copiar o arquivo gerado com `cat` de **dentro** do container, sem
+passar pelo `fs::copy` do host:
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm --user 1000:1000 -e HOME=/tmp/h \
+  -e CARGO_HOME=/usr/local/cargo -e RUSTUP_HOME=/usr/local/rustup \
+  -v "$PWD:/w" -w /w -v ai-memory-cargo:/usr/local/cargo/registry -v ai-memory-rustup:/usr/local/rustup \
+  -v ai-memory-target:/w/target rust:1.95 bash -c '
+f=$(ls -t /w/target/debug/build/ai-memory-web-*/out/tailwind.css | head -1)
+cat "$f" > crates/ai-memory-web/static/tailwind.css
+'
+```
+
+Depois, conferir `git diff --exit-code -- crates/ai-memory-web/static/tailwind.css` só ADICIONA as classes
+esperadas (não usar grep para decidir se precisa regenerar: qualquer classe nova no template exige rodar
+isto de novo, é o `git diff --exit-code` do CI que julga). Se a cópia sair vazia ou corrompida,
+`git checkout -- crates/ai-memory-web/static/tailwind.css` desfaz e tenta de novo. A PR da linha do tempo
+já tinha falhado uma vez na CI por causa disso (classes `w-20`, `list-disc`, `pl-5` fora do CSS
+versionado).
+
 **Passo 2: Gate** (fato 2). Tudo verde.
 
 **Passo 3: Imagem**

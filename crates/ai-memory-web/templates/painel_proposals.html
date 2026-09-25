@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block title %}Propostas · {{ workspace }}/{{ project }} — ai-memory{% endblock %}
+
+{% block content %}
+<nav class="mb-6 flex items-center gap-1 text-sm text-slate-500 dark:text-slate-400">
+  <a href="." class="hover:text-blue-600 dark:hover:text-blue-400">home</a>
+  <span>/</span>
+  <span class="text-slate-400 dark:text-slate-500">{{ workspace }}</span>
+  <span>/</span>
+  <a href="{{ base_href }}" class="text-slate-700 dark:text-slate-200 font-medium hover:text-blue-600 dark:hover:text-blue-400">{{ project }}</a>
+</nav>
+
+<h1 class="text-2xl font-bold text-slate-900 dark:text-slate-100 mb-6">{{ workspace }}/{{ project }}</h1>
+
+{% include "_abas.html" %}
+
+<p class="text-sm text-slate-700 dark:text-slate-300 mb-1">
+  Propostas de melhoria automática pendentes de decisão. Filtre com
+  <code class="font-mono">?status=pending</code>, <code class="font-mono">?status=approved</code>,
+  <code class="font-mono">?status=rejected</code> ou <code class="font-mono">?status=conflict</code>.
+  Um valor desconhecido volta para <code class="font-mono">pending</code>. Status atual:
+  <span class="font-mono">{{ status }}</span>.
+</p>
+<p class="text-xs text-slate-400 dark:text-slate-600 mb-6">
+  Esta tela é só leitura: nenhum botão aqui aprova ou rejeita. Copie o comando do cartão e rode-o no
+  terminal.
+</p>
+
+{% if proposals.is_empty() %}
+<p class="text-sm text-slate-400 dark:text-slate-600 mt-6">Nenhuma proposta com status "{{ status }}" neste projeto.</p>
+{% else %}
+<ul class="mt-6 space-y-6">
+  {% for p in proposals %}
+  <li class="rounded border border-slate-200 dark:border-slate-800 p-4">
+    <div class="flex flex-wrap items-baseline gap-2 mb-2">
+      <h2 class="text-base font-semibold text-slate-900 dark:text-slate-100">{{ p.title }}</h2>
+      <span class="text-xs font-mono text-slate-400 dark:text-slate-600">#{{ p.id }}</span>
+      <span class="text-xs font-mono text-slate-500 dark:text-slate-400">{{ p.kind }}</span>
+      <span class="text-xs font-mono text-slate-500 dark:text-slate-400">{{ p.operation }}</span>
+      <span class="text-xs font-mono text-slate-500 dark:text-slate-400">{{ p.target_path }}</span>
+      <span class="text-xs font-mono text-slate-500 dark:text-slate-400">confiança {{ p.confidence_pct }}%</span>
+      {% if p.conflict %}
+      <span class="text-xs font-semibold uppercase text-red-600 dark:text-red-400">conflito</span>
+      {% endif %}
+    </div>
+
+    <p class="text-sm text-slate-700 dark:text-slate-300 mb-3">{{ p.rationale }}</p>
+
+    {% if !p.evidence.is_empty() %}
+    <ul class="mb-3 pl-5 list-disc space-y-1">
+      {% for e in p.evidence %}
+      <li class="text-xs text-slate-500 dark:text-slate-400">
+        {% if let Some(href) = e.href %}
+        <a href="{{ href }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ e.page }}</a>
+        {% else %}
+        <span class="font-mono">{{ e.page }}</span>
+        {% endif %}
+        {% if !e.quote.is_empty() %}
+        <span class="italic"> — "{{ e.quote }}"</span>
+        {% endif %}
+      </li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+
+    <div class="grid gap-3 md:grid-cols-2 mb-3">
+      <div>
+        <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-1">Antes</h3>
+        {% if let Some(before) = p.before %}
+        <pre class="text-xs whitespace-pre-wrap break-words rounded bg-slate-100 dark:bg-slate-800 p-2">{{ before }}</pre>
+        {% else %}
+        <p class="text-xs text-slate-400 dark:text-slate-600">(página nova — não existe ainda)</p>
+        {% endif %}
+      </div>
+      <div>
+        <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-1">Depois</h3>
+        <pre class="text-xs whitespace-pre-wrap break-words rounded bg-slate-100 dark:bg-slate-800 p-2">{{ p.after }}</pre>
+      </div>
+    </div>
+
+    <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mb-1">Comandos</h3>
+    <pre class="text-xs whitespace-pre-wrap break-words rounded bg-slate-100 dark:bg-slate-800 p-2 select-all">{{ p.approve_cmd }}
+{{ p.reject_cmd }}</pre>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}
