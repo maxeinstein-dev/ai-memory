@@ -11,6 +11,7 @@
 //! - `GET /`                              → project list (cards)
 //! - `GET /w/:workspace/:project`         → page tree + recent activity
 //! - `GET /w/:workspace/:project/p/*path` → rendered markdown + metadata
+//! - `GET /w/:workspace/:project/briefing` → session-start brief preview
 //! - `GET /search?q=…`                    → FTS5 hit list
 //! - `GET /static/*`                      → embedded CSS + logo
 //!
@@ -23,6 +24,7 @@
 
 use std::sync::Arc;
 
+use ai_memory_core::{ProjectId, WorkspaceId};
 use ai_memory_store::ReaderPool;
 use ai_memory_wiki::Wiki;
 use axum::Router;
@@ -63,6 +65,18 @@ pub fn api_router(reader: ReaderPool, wiki: Wiki) -> Router {
 /// stateless — it returns the same embedded PNG as `/web/static/logo.png`.
 pub fn favicon_router() -> Router {
     routes::build_favicon()
+}
+
+/// Test-only entry point to the briefing screen's data: the suite needs the
+/// raw markdown, which the rendered HTML escapes. Not a supported API.
+#[doc(hidden)]
+pub async fn montar_briefing_para_teste(
+    reader: &ReaderPool,
+    ws: WorkspaceId,
+    proj: ProjectId,
+    max_chars: Option<&str>,
+) -> anyhow::Result<routes::painel_briefing::Briefing> {
+    routes::painel_briefing::montar(reader, ws, proj, max_chars).await
 }
 
 // Integration tests compile into this crate's test harness instead of a

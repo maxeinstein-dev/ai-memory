@@ -179,6 +179,63 @@ pub(crate) struct ProjectView {
     pub system: Vec<Folder>,
     /// N most-recent knowledge pages for the right column.
     pub recent: Vec<PageRow>,
+    /// Link target for this project (`w/{ws}/{proj}`), used by `_abas.html`
+    /// to build the tab hrefs relative to the injected `<base href>`.
+    pub base_href: String,
+    /// Which panel-tab is active; `_abas.html` bolds the matching link.
+    pub aba: &'static str,
+}
+
+// ---------------------------------------------------------------------------
+// painel_briefing.html
+// ---------------------------------------------------------------------------
+
+/// One core page the session brief considered.
+pub(crate) struct ItemDoBriefing {
+    /// Relative wiki path.
+    pub path: String,
+    /// Page title.
+    pub title: String,
+    /// Trimmed body length in bytes — the same unit the renderer budgets
+    /// against (`buf.len()` in `brief.rs`), not chars.
+    pub bytes: usize,
+    /// Whether this page's own body header appears in the rendered brief:
+    /// matches the renderer's exact `` (`path`) `` body-header marker, not
+    /// an approximation by title.
+    pub entrou: bool,
+}
+
+/// View-model for `GET /w/:workspace/:project/briefing`.
+#[derive(Template)]
+#[template(path = "painel_briefing.html")]
+pub(crate) struct BriefingView {
+    /// Workspace name.
+    pub workspace: String,
+    /// Project name.
+    pub project: String,
+    /// Link target for this project, used by `_abas.html`.
+    pub base_href: String,
+    /// Active panel-tab for `_abas.html`.
+    pub aba: &'static str,
+    /// Bytes the brief uses (`markdown.len()` — the renderer budgets in
+    /// bytes, not chars; accents and emoji cost more than one).
+    pub usados: usize,
+    /// Effective (clamped) byte budget.
+    pub orcamento: usize,
+    /// `usados` as a percentage of `orcamento`, capped at 100 — drives the
+    /// inline `width` of the usage bar.
+    pub pct: usize,
+    /// `ai_memory_store::brief::BRIEF_BUDGET_DEFAULT` — the budget this
+    /// preview uses when the request carries no `?max_chars=`. Shown so the
+    /// operator does not mistake it for the client's actual
+    /// `[briefing] max_chars`, which the server has no way to see.
+    pub orcamento_padrao: usize,
+    /// The brief rendered by this crate's markdown renderer (HTML, trusted).
+    pub html: String,
+    /// The raw brief markdown, escaped by the template.
+    pub markdown: String,
+    /// Core pages the store returned.
+    pub itens: Vec<ItemDoBriefing>,
 }
 
 /// View-model for a namespace (directory) listing — `GET

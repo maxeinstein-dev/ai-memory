@@ -9,10 +9,9 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
 
 use crate::markdown;
+use crate::routes::not_found_response;
 use crate::state::WebState;
-use crate::templates::{
-    NamespaceView, NotFoundView, PageRow, PageView, humanize, page_href, project_href,
-};
+use crate::templates::{NamespaceView, PageRow, PageView, humanize, page_href, project_href};
 
 /// Handler for `GET /w/:workspace/:project/p/*path`.
 pub(crate) async fn handler(
@@ -137,12 +136,4 @@ async fn namespace_or_not_found(
         Ok(html) => Html(html).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
-}
-
-/// Render a 404 response with the not-found template body.
-fn not_found_response() -> Response {
-    let html = NotFoundView {}
-        .render()
-        .unwrap_or_else(|_| "<h1>Not found</h1>".to_owned());
-    (StatusCode::NOT_FOUND, Html(html)).into_response()
 }
