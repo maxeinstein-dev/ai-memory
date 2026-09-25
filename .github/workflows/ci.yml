@@ -2,7 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    # alfama/main: fork trunk; its push runs seed the cache fork PRs restore
+    # (guarded by .github/workflows/alfama-guard.yml).
+    branches: [main, alfama/main]
   pull_request:
     types: [opened, synchronize, reopened, labeled]
   # Manual full run (macOS legs included) — dispatch on the
