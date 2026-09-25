@@ -94,6 +94,43 @@ pub(crate) fn humanize(iso: &str) -> String {
     format!("{years} year{} ago", if years == 1 { "" } else { "s" })
 }
 
+/// Portuguese counterpart of [`humanize`] for the fork's panel screens, whose
+/// UI text is Portuguese; upstream's screens keep the English [`humanize`].
+#[must_use]
+pub(crate) fn humanize_pt(iso: &str) -> String {
+    let Ok(then) = iso.parse::<jiff::Timestamp>() else {
+        return iso.to_owned();
+    };
+    let secs = (jiff::Timestamp::now().as_microsecond() - then.as_microsecond()).abs() / 1_000_000;
+    let plural = |n: i64, one: &str, many: &str| {
+        if n == 1 {
+            format!("há 1 {one}")
+        } else {
+            format!("há {n} {many}")
+        }
+    };
+    if secs < 60 {
+        return "agora mesmo".to_owned();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return plural(mins, "minuto", "minutos");
+    }
+    let hours = mins / 60;
+    if hours < 24 {
+        return plural(hours, "hora", "horas");
+    }
+    let days = hours / 24;
+    if days < 30 {
+        return plural(days, "dia", "dias");
+    }
+    let months = days / 30;
+    if months < 12 {
+        return plural(months, "mês", "meses");
+    }
+    plural(months / 12, "ano", "anos")
+}
+
 // ---------------------------------------------------------------------------
 // projects.html
 // ---------------------------------------------------------------------------

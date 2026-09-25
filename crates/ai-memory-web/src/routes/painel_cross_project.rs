@@ -23,7 +23,7 @@ use axum::response::{Html, IntoResponse, Response};
 use crate::routes::api::{owner_filter_for, serves_handoff_body};
 use crate::state::WebState;
 use crate::templates::{
-    CrossProjectView, OpenHandoffRow, PendingMessageRow, RuleGroupRow, RuleMemberRow, humanize,
+    CrossProjectView, OpenHandoffRow, PendingMessageRow, RuleGroupRow, RuleMemberRow, humanize_pt,
     page_href, project_href,
 };
 
@@ -125,7 +125,7 @@ async fn collect_handoffs_and_messages(
             project_href: project_href(workspace, project),
             agent: h.origin.from_agent.as_str().to_owned(),
             summary: with_body.then_some(h.content.summary),
-            age: humanize(&h.lifecycle.created_at.to_string()),
+            age: humanize_pt(&h.lifecycle.created_at.to_string()),
         });
     }
 
@@ -148,7 +148,7 @@ async fn collect_handoffs_and_messages(
             to_workspace: workspace.to_owned(),
             to_project: project.to_owned(),
             summary,
-            age: humanize(&m.created_at.to_string()),
+            age: humanize_pt(&m.created_at.to_string()),
         });
     }
     Ok(())
