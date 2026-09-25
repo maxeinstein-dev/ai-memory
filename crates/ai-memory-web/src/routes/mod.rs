@@ -18,6 +18,7 @@ mod index;
 mod page;
 pub(crate) mod painel_briefing;
 pub(crate) mod painel_cross_project;
+pub(crate) mod painel_overview;
 pub(crate) mod painel_proposals;
 pub(crate) mod painel_timeline;
 mod project;
@@ -35,8 +36,9 @@ pub(crate) fn not_found_response() -> Response {
 
 /// Resolve the scope of a panel screen without creating anything: an unknown
 /// workspace/project answers the HTML 404 page, any other store failure a
-/// logged 500. Unlike the project overview (which renders an empty tree for
-/// an unknown project), panel screens need real ids to query with.
+/// logged 500. Unlike the Páginas tab's page tree (`project::handler`, which
+/// renders an empty tree for an unknown project instead), panel screens need
+/// real ids to query with.
 pub(crate) async fn escopo_html(
     state: &WebState,
     workspace: &str,
@@ -59,7 +61,8 @@ pub(crate) async fn escopo_html(
 pub(crate) fn build(state: Arc<WebState>) -> Router {
     Router::new()
         .route("/", get(index::handler))
-        .route("/w/{workspace}/{project}", get(project::handler))
+        .route("/w/{workspace}/{project}", get(painel_overview::handler))
+        .route("/w/{workspace}/{project}/paginas", get(project::handler))
         .route("/w/{workspace}/{project}/p/{*path}", get(page::handler))
         .route(
             "/w/{workspace}/{project}/briefing",

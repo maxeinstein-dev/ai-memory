@@ -20,12 +20,13 @@
 {% if days.is_empty() %}
 <p class="text-sm text-slate-400 dark:text-slate-600 mt-6">Nenhuma sessão neste projeto nos últimos {{ dias }} dias.</p>
 {% else %}
-<div class="mt-6 mb-8 space-y-1">
+<p class="text-xs text-slate-400 dark:text-slate-600 mt-6 mb-1">cada barra é um dia; o tamanho é o número de sessões</p>
+<div class="mb-8 space-y-1">
   {% for day in days %}
   <div class="flex items-center gap-4 text-xs text-slate-500 dark:text-slate-400">
     <span class="w-20 shrink-0 font-mono">{{ day.date }}</span>
     <div class="flex-1 h-4 rounded bg-slate-100 dark:bg-slate-800"><div class="h-full rounded bg-blue-600" style="width: {{ day.pct }}%"></div></div>
-    <span class="w-20 shrink-0 font-mono">{{ day.count }}</span>
+    <span class="shrink-0 whitespace-nowrap">{{ day.sessions_label }}{% if !day.kind_summary.is_empty() %} · {{ day.kind_summary }}{% endif %}</span>
   </div>
   {% endfor %}
 </div>

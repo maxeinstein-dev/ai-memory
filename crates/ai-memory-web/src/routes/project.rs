@@ -1,4 +1,6 @@
-//! `GET /w/:workspace/:project` — page tree + recent activity.
+//! `GET /w/:workspace/:project/paginas` — page tree + recent activity. The
+//! bare `/w/:workspace/:project` is the project overview
+//! (`painel_overview::handler`); this screen is the "Páginas" tab.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -8,10 +10,12 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::Html;
 
+use ai_memory_store::is_system_page;
+
 use crate::state::WebState;
 use crate::templates::{Folder, PageRow, ProjectView, humanize, page_href, project_href};
 
-/// Handler for `GET /w/:workspace/:project`.
+/// Handler for `GET /w/:workspace/:project/paginas`.
 pub(crate) async fn handler(
     State(state): State<Arc<WebState>>,
     Path((workspace, project)): Path<(String, String)>,
@@ -101,22 +105,4 @@ pub(crate) async fn handler(
     .render()
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Html(html))
-}
-
-/// Machinery rather than knowledge: hidden from Recent Activity and
-/// collapsed into the sidebar's System section. Underscore-prefixed
-/// trees are system surfaces — except `_rules`, which holds standing
-/// human-authored rules — as are session captures and the root-level
-/// bookkeeping pages (monthly logs, the OKF bundle index, `_meta.md`).
-fn is_system_page(path: &str) -> bool {
-    if path.starts_with("_rules/") {
-        return false;
-    }
-    if path.starts_with('_') || path.starts_with("sessions/") {
-        return true;
-    }
-    if path.contains('/') {
-        return false;
-    }
-    path == "index.md" || path == "_meta.md" || (path.starts_with("log-") && path.ends_with(".md"))
 }

@@ -132,6 +132,43 @@ pub(crate) fn humanize_pt(iso: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Portuguese count labels — shared by the project overview and the timeline
+// ---------------------------------------------------------------------------
+
+/// Fixed display order for the project's non-system page kinds, shared by
+/// the "Em números"/"Sem data de origem" sections of the project overview
+/// and the timeline's per-day kind breakdown, so the two screens never drift
+/// apart on ordering. Any other kind (`note`, …) is appended after these,
+/// sorted alphabetically by its caller.
+pub(crate) const PAGE_KIND_ORDER: [&str; 6] =
+    ["decision", "concept", "fact", "gotcha", "rule", "procedure"];
+
+/// `"{n} {singular}"` for `n == 1`, `"{n} {plural}"` otherwise.
+#[must_use]
+pub(crate) fn plural_pt(n: usize, singular: &str, plural: &str) -> String {
+    format!("{n} {}", if n == 1 { singular } else { plural })
+}
+
+/// Portuguese count label for a page `kind` (`decision`, `concept`, `fact`,
+/// `gotcha`, `rule`, `procedure`), singular/plural — `"1 decisão"`,
+/// `"88 decisões"`. A kind outside that fixed set (`note`, a
+/// frontmatter override, …) is shown as-is, without guessing a plural:
+/// `"2 note"`.
+#[must_use]
+pub(crate) fn kind_label_pt(kind: &str, n: usize) -> String {
+    let (singular, plural) = match kind {
+        "decision" => ("decisão", "decisões"),
+        "concept" => ("conceito", "conceitos"),
+        "fact" => ("fato", "fatos"),
+        "gotcha" => ("gotcha", "gotchas"),
+        "rule" => ("regra", "regras"),
+        "procedure" => ("procedimento", "procedimentos"),
+        other => return format!("{n} {other}"),
+    };
+    plural_pt(n, singular, plural)
+}
+
+// ---------------------------------------------------------------------------
 // projects.html
 // ---------------------------------------------------------------------------
 
@@ -201,7 +238,7 @@ pub(crate) struct Folder {
     pub pages: Vec<PageRow>,
 }
 
-/// View-model for `GET /w/:workspace/:project`.
+/// View-model for `GET /w/:workspace/:project/paginas`.
 #[derive(Template)]
 #[template(path = "project.html")]
 pub(crate) struct ProjectView {
@@ -309,11 +346,17 @@ pub(crate) struct TimelineSessionRow {
 pub(crate) struct TimelineDay {
     /// `YYYY-MM-DD`, UTC.
     pub date: String,
-    /// Number of sessions that started this day.
-    pub count: usize,
     /// `count * 100 / max_sessions_in_period`, capped at 100 — drives the
     /// inline `width` of the day's bar (no dynamic Tailwind class).
     pub pct: usize,
+    /// `"8 sessões"`/`"1 sessão"` — the day's session count, spelled out
+    /// ([`plural_pt`]) instead of the bare number the label used to be.
+    pub sessions_label: String,
+    /// What the day produced, by page kind — `"3 decisões · 5 gotchas · 1
+    /// conceito"` ([`kind_label_pt`], from `origin_counts_by_day`), zeros
+    /// omitted. Empty string when the day produced no page with an origin
+    /// date at all (rendered without a leading `·`).
+    pub kind_summary: String,
     /// This day's sessions, most recent first (inherited from the store's
     /// ordering).
     pub sessions: Vec<TimelineSessionRow>,
@@ -335,6 +378,117 @@ pub(crate) struct TimelineView {
     pub dias: i64,
     /// Days with at least one session in the window, most recent first.
     pub days: Vec<TimelineDay>,
+}
+
+// ---------------------------------------------------------------------------
+// painel_overview.html
+// ---------------------------------------------------------------------------
+
+/// One page reference shown on the project overview (a recent decision, a
+/// recent gotcha, a core page, a week's new/updated page) — link, title,
+/// and the fields that only some of those sections use.
+pub(crate) struct OverviewPageRow {
+    /// Link target for this page.
+    pub href: String,
+    /// Page title (untrusted — page content; escaped by askama).
+    pub title: String,
+    /// The page's kind. Only rendered by the core-pages section, and only
+    /// when that section is mixing kinds (`OverviewView::core_show_kind`).
+    pub kind: String,
+    /// One-line summary (`ai_memory_store::summary_line`). `None` for
+    /// sections that do not show one (weekly changes, core pages).
+    pub summary: Option<String>,
+    /// Origin date (`YYYY-MM-DD`, UTC). `None` for sections that do not
+    /// show one (weekly changes, core pages).
+    pub date: Option<String>,
+}
+
+/// One page-kind (or session) count in the "Em números" section — a label
+/// already spelled out in Portuguese, linking to the matching folder anchor
+/// on the Páginas tab.
+pub(crate) struct KindCount {
+    /// `"88 decisões"`, `"98 sessões"`, … ([`kind_label_pt`]/[`plural_pt`]).
+    pub label: String,
+    /// Link to the corresponding folder anchor on the Páginas tab
+    /// (`base_href/paginas#pasta-<folder>`), or the plain Páginas link when
+    /// the kind has no single matching folder.
+    pub href: String,
+}
+
+/// The scope's covered period, from the first to the last session (both
+/// dates UTC) — `None` when the scope has no sessions at all.
+pub(crate) struct PeriodRow {
+    /// `YYYY-MM-DD` of the earliest session.
+    pub first: String,
+    /// `YYYY-MM-DD` of the most recent session.
+    pub last: String,
+}
+
+/// The session that produced the most pages of a [`WeekChangesRow`].
+pub(crate) struct TopSessionRow {
+    /// Which agent CLI ran the session.
+    pub agent: String,
+    /// `"12 páginas"`/`"1 página"` ([`plural_pt`]).
+    pub pages_label: String,
+}
+
+/// One ISO week (Monday-Sunday) in "Últimas grandes mudanças"
+/// (`ai_memory_store::WeekChanges`, rendered).
+pub(crate) struct WeekChangesRow {
+    /// UTC date of the week's Monday.
+    pub start_date: String,
+    /// `"3 sessões"`/`"1 sessão"` ([`plural_pt`]).
+    pub sessions_label: String,
+    /// Decision pages new this week, ordered by origin date.
+    pub new_decisions: Vec<OverviewPageRow>,
+    /// Concept pages new or updated this week, ordered by path.
+    pub new_or_updated_concepts: Vec<OverviewPageRow>,
+    /// The session that produced the most pages this week. `None` only when
+    /// the week (impossibly, since a session is what puts a week on this
+    /// list at all) has no sessions.
+    pub top_session: Option<TopSessionRow>,
+}
+
+/// View-model for `GET /w/:workspace/:project` (the project overview).
+#[derive(Template)]
+#[template(path = "painel_overview.html")]
+pub(crate) struct OverviewView {
+    /// Workspace name.
+    pub workspace: String,
+    /// Project name.
+    pub project: String,
+    /// Link target for this project, used by `_abas.html`.
+    pub base_href: String,
+    /// Active panel-tab for `_abas.html`.
+    pub aba: &'static str,
+    /// "Em números": one count per page kind, plus the session count, in a
+    /// fixed order (decisions, concepts, gotchas, rules, procedures,
+    /// sessions) — always present, zero counts included, so the section
+    /// never silently drops a kind.
+    pub kind_counts: Vec<KindCount>,
+    /// The scope's covered period. `None` when the project has no sessions.
+    pub period: Option<PeriodRow>,
+    /// "Últimas grandes mudanças": the most recent active ISO weeks, most
+    /// recent first.
+    pub weeks: Vec<WeekChangesRow>,
+    /// "Decisões recentes": the 10 most recent decisions by origin date.
+    pub recent_decisions: Vec<OverviewPageRow>,
+    /// Heading for the core-pages section — "Conceitos centrais" when every
+    /// core page is a concept, otherwise a heading that says the section
+    /// mixes kinds (`OverviewView::core_show_kind` then shows each one).
+    pub core_title: &'static str,
+    /// Whether the core-pages section shows each page's kind (`true` unless
+    /// every core page is a concept).
+    pub core_show_kind: bool,
+    /// The briefing's core pages, same call and order as the Briefing
+    /// screen (`ReaderPool::session_brief_pages_with_slot_visibility`).
+    pub core_pages: Vec<OverviewPageRow>,
+    /// "Gotchas recentes": the 10 most recent gotchas by origin date.
+    pub recent_gotchas: Vec<OverviewPageRow>,
+    /// "Sem data de origem": one count per kind among pages with no session
+    /// evidence at all, known kinds first (fixed order), then any other
+    /// kind sorted alphabetically. Only kinds with at least one such page.
+    pub missing_origin: Vec<KindCount>,
 }
 
 // ---------------------------------------------------------------------------

@@ -140,7 +140,7 @@ async fn smoke_project_page_returns_200() {
 
     let app = router(store.reader.clone(), wiki.clone());
     let req = Request::builder()
-        .uri("/w/default/scratch")
+        .uri("/w/default/scratch/paginas")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -174,7 +174,7 @@ async fn pagina_de_projeto_mostra_as_abas_do_painel() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/w/default/scratch")
+                .uri("/w/default/scratch/paginas")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -187,6 +187,7 @@ async fn pagina_de_projeto_mostra_as_abas_do_painel() {
         .unwrap();
     let text = std::str::from_utf8(&body).unwrap();
     for href in [
+        "href=\"w/default/scratch\"",
         "href=\"w/default/scratch/briefing\"",
         "href=\"w/default/scratch/linha-do-tempo\"",
         "href=\"w/default/scratch/propostas\"",
@@ -197,7 +198,7 @@ async fn pagina_de_projeto_mostra_as_abas_do_painel() {
         );
     }
     assert!(
-        text.contains("<a href=\"w/default/scratch\" class=\"font-semibold\">Páginas</a>"),
+        text.contains("<a href=\"w/default/scratch/paginas\" class=\"font-semibold\">Páginas</a>"),
         "aba Páginas deveria estar ativa (font-semibold): {text}"
     );
 }
@@ -220,7 +221,7 @@ async fn pagina_de_projeto_com_espaco_no_nome_faz_percent_encoding_nas_abas() {
     let resp = app
         .oneshot(
             Request::builder()
-                .uri("/w/default/meu%20projeto")
+                .uri("/w/default/meu%20projeto/paginas")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -233,6 +234,8 @@ async fn pagina_de_projeto_com_espaco_no_nome_faz_percent_encoding_nas_abas() {
         .unwrap();
     let text = std::str::from_utf8(&body).unwrap();
     for href in [
+        "href=\"w/default/meu%20projeto\"",
+        "href=\"w/default/meu%20projeto/paginas\"",
         "href=\"w/default/meu%20projeto/briefing\"",
         "href=\"w/default/meu%20projeto/linha-do-tempo\"",
         "href=\"w/default/meu%20projeto/propostas\"",
@@ -462,7 +465,7 @@ async fn web_links_percent_encode_route_segments() {
 
     let app = router(store.reader.clone(), wiki.clone());
     let req = Request::builder()
-        .uri("/w/default/scratch%20%231")
+        .uri("/w/default/scratch%20%231/paginas")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -3106,7 +3109,7 @@ async fn project_view_separates_machinery_from_knowledge() {
 
     let app = router(store.reader.clone(), wiki.clone());
     let req = Request::builder()
-        .uri("/w/default/scratch")
+        .uri("/w/default/scratch/paginas")
         .body(Body::empty())
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -3614,7 +3617,78 @@ async fn linha_do_tempo_recusa_projeto_de_outro_workspace() {
     assert_eq!(legitimo.status(), StatusCode::OK);
 }
 
-/// (e) A produced page's title is untrusted content (LLM-consolidated text)
+/// (e) The day's bar carries a spelled-out session count (`"N sessões"`,
+/// singular `"1 sessão"`) plus, alongside it, what the day produced by page
+/// kind (`origin_counts_by_day`) — Portuguese plurals, zeros omitted.
+#[tokio::test]
+async fn linha_do_tempo_mostra_sessoes_por_extenso_e_contagens_por_tipo() {
+    use ai_memory_core::{PageEvidence, PageEvidenceKind};
+
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    let sid = seed_session(&store, ws, proj, true, &[]).await;
+
+    let mut decision = new_page(
+        ws,
+        proj,
+        "decisions/usar-postgres.md",
+        "Usar Postgres",
+        "corpo",
+    );
+    decision.frontmatter_json = serde_json::json!({"kind": "decision"});
+    decision.evidence = vec![PageEvidence {
+        kind: PageEvidenceKind::Session,
+        source_id: sid.to_string(),
+    }];
+    store.writer.upsert_page(decision).await.unwrap();
+
+    let mut gotcha = new_page(ws, proj, "gotchas/timeout.md", "Timeout no CI", "corpo");
+    gotcha.frontmatter_json = serde_json::json!({"kind": "gotcha"});
+    gotcha.evidence = vec![PageEvidence {
+        kind: PageEvidenceKind::Session,
+        source_id: sid.to_string(),
+    }];
+    store.writer.upsert_page(gotcha).await.unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/linha-do-tempo")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("1 sessão"),
+        "rótulo por extenso ausente: {text}"
+    );
+    assert!(
+        text.contains("1 decisão") && text.contains("1 gotcha"),
+        "contagens por tipo ausentes: {text}"
+    );
+    assert!(
+        text.contains("cada barra é um dia; o tamanho é o número de sessões"),
+        "legenda das barras ausente: {text}"
+    );
+}
+
+/// (f) A produced page's title is untrusted content (LLM-consolidated text)
 /// and must render HTML-escaped, never as `|safe` markup.
 #[tokio::test]
 async fn linha_do_tempo_escapa_titulo_malicioso_de_pagina_produzida() {
@@ -3668,6 +3742,331 @@ async fn linha_do_tempo_escapa_titulo_malicioso_de_pagina_produzida() {
     assert!(
         text.contains("&lt;script&gt;"),
         "o titulo malicioso tem de aparecer escapado pelo askama: {text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// visão geral (project overview)
+// ---------------------------------------------------------------------------
+
+/// (a) Every "Em números" count, "Decisões recentes", "Conceitos centrais"
+/// (via the pinned-page briefing core query), "Gotchas recentes" and "Sem
+/// data de origem" render from seeded data, and the "Visão geral" tab is
+/// the active one.
+#[tokio::test]
+async fn visao_geral_mostra_numeros_e_secoes_com_dados_semeados() {
+    use ai_memory_core::{PageEvidence, PageEvidenceKind};
+
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    let sid = seed_session(&store, ws, proj, true, &[]).await;
+
+    let mut decision = new_page(
+        ws,
+        proj,
+        "decisions/usar-postgres.md",
+        "Usar Postgres",
+        "corpo da decisao",
+    );
+    decision.frontmatter_json =
+        serde_json::json!({"kind": "decision", "summary": "Trocar sqlite por postgres."});
+    decision.evidence = vec![PageEvidence {
+        kind: PageEvidenceKind::Session,
+        source_id: sid.to_string(),
+    }];
+    store.writer.upsert_page(decision).await.unwrap();
+
+    let mut concept = new_page(
+        ws,
+        proj,
+        "concepts/raft.md",
+        "Consenso Raft",
+        "corpo do conceito",
+    );
+    concept.frontmatter_json = serde_json::json!({"kind": "concept"});
+    concept.pinned = true;
+    concept.evidence = vec![PageEvidence {
+        kind: PageEvidenceKind::Session,
+        source_id: sid.to_string(),
+    }];
+    store.writer.upsert_page(concept).await.unwrap();
+
+    let mut gotcha = new_page(
+        ws,
+        proj,
+        "gotchas/timeout.md",
+        "Timeout no CI",
+        "corpo do gotcha",
+    );
+    gotcha.frontmatter_json = serde_json::json!({"kind": "gotcha"});
+    gotcha.evidence = vec![PageEvidence {
+        kind: PageEvidenceKind::Session,
+        source_id: sid.to_string(),
+    }];
+    store.writer.upsert_page(gotcha).await.unwrap();
+
+    // No evidence at all — surfaces in "Sem data de origem", never dated by
+    // `created_at`.
+    let mut procedure = new_page(
+        ws,
+        proj,
+        "procedures/deploy.md",
+        "Como fazer deploy",
+        "corpo do procedimento",
+    );
+    procedure.frontmatter_json = serde_json::json!({"kind": "procedure"});
+    store.writer.upsert_page(procedure).await.unwrap();
+
+    let today = jiff::Timestamp::now().strftime("%Y-%m-%d").to_string();
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+
+    assert!(
+        text.contains("<a href=\"w/default/scratch\" class=\"font-semibold\">Visão geral</a>"),
+        "aba Visão geral deveria estar ativa: {text}"
+    );
+
+    for esperado in [
+        "1 decisão",
+        "1 conceito",
+        "1 gotcha",
+        "0 regras",
+        "1 procedimento",
+        "1 sessão",
+    ] {
+        assert!(
+            text.contains(esperado),
+            "esperava {esperado:?} em 'Em números': {text}"
+        );
+    }
+    assert!(
+        text.contains(&today),
+        "período coberto deveria citar a data de hoje: {text}"
+    );
+
+    assert!(
+        text.contains("Usar Postgres"),
+        "decisão recente ausente: {text}"
+    );
+    assert!(
+        text.contains("Trocar sqlite por postgres."),
+        "resumo da decisão recente ausente: {text}"
+    );
+    assert!(
+        text.contains("Conceitos centrais") && text.contains("Consenso Raft"),
+        "conceito central ausente: {text}"
+    );
+    assert!(
+        text.contains("Timeout no CI"),
+        "gotcha recente ausente: {text}"
+    );
+    assert!(
+        text.contains("Semana de"),
+        "seção de últimas mudanças ausente: {text}"
+    );
+}
+
+/// (b) `/w/:workspace/:project/paginas` still shows the full page tree —
+/// the screen that moved off the bare project route.
+#[tokio::test]
+async fn paginas_mostra_a_arvore_de_paginas_do_projeto() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(new_page(
+            ws,
+            proj,
+            "concepts/retrieval.md",
+            "Retrieval Concept",
+            "body",
+        ))
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/paginas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(text.contains("Retrieval Concept"), "árvore ausente: {text}");
+    assert!(
+        text.contains("<a href=\"w/default/scratch/paginas\" class=\"font-semibold\">Páginas</a>"),
+        "aba Páginas deveria estar ativa: {text}"
+    );
+}
+
+/// (c) An unknown project answers the HTML 404 page.
+#[tokio::test]
+async fn visao_geral_de_projeto_inexistente_responde_404() {
+    let (_tmp, store, wiki) = setup().await;
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/nao-existe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// (d) ADVERSARIAL: a project that exists, but under a DIFFERENT workspace
+/// than the one named in the URL, must 404 exactly like an unknown project
+/// (control: the very same project under its real workspace answers 200).
+/// Bite-checked by hand: `escopo_html`'s scope lookup was temporarily
+/// swapped for a project-only resolution that ignored the workspace
+/// argument, this test was confirmed to fail (200 instead of 404), then the
+/// change was reverted (`ai-memory-store/src/scope.rs` untouched here) —
+/// same protocol as `linha_do_tempo_recusa_projeto_de_outro_workspace`.
+#[tokio::test]
+async fn visao_geral_recusa_projeto_de_outro_workspace() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws_a = store
+        .writer
+        .get_or_create_workspace("workspace-a")
+        .await
+        .unwrap();
+    let _ws_b = store
+        .writer
+        .get_or_create_workspace("workspace-b")
+        .await
+        .unwrap();
+    let _ = store
+        .writer
+        .get_or_create_project(ws_a, "scratch", None)
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let cruzado = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/workspace-b/scratch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cruzado.status(),
+        StatusCode::NOT_FOUND,
+        "projeto de outro workspace nao pode responder 200"
+    );
+
+    // Control: the same project name, under its real workspace, is fine.
+    let app = router(store.reader.clone(), wiki.clone());
+    let legitimo = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/workspace-a/scratch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legitimo.status(), StatusCode::OK);
+}
+
+/// (e) A page's title and one-line summary are untrusted content and must
+/// render HTML-escaped, never as `|safe` markup.
+#[tokio::test]
+async fn visao_geral_escapa_titulo_e_resumo_maliciosos() {
+    use ai_memory_core::{PageEvidence, PageEvidenceKind};
+
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    let sid = seed_session(&store, ws, proj, true, &[]).await;
+
+    let mut decision = new_page(
+        ws,
+        proj,
+        "decisions/malicious.md",
+        "<script>alert(1)</script>",
+        "corpo",
+    );
+    decision.frontmatter_json =
+        serde_json::json!({"kind": "decision", "summary": "<script>alert(2)</script>"});
+    decision.evidence = vec![PageEvidence {
+        kind: PageEvidenceKind::Session,
+        source_id: sid.to_string(),
+    }];
+    store.writer.upsert_page(decision).await.unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !text.contains("<script>alert(1)</script>") && !text.contains("<script>alert(2)</script>"),
+        "título ou resumo maliciosos nao podem aparecer sem escape: {text}"
+    );
+    assert!(
+        text.matches("&lt;script&gt;").count() >= 2,
+        "título e resumo maliciosos têm de aparecer escapados pelo askama: {text}"
     );
 }
 

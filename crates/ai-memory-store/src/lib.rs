@@ -64,7 +64,11 @@ pub use ops::{
     PurgeSummary, ReorgSummary, backfill_entity_index, backfill_page_windows,
     backfill_page_windows_in_batches, purge_session, record_embed_failure,
 };
-pub use painel::{ProducedPage, RuleCandidate, RuleGroup, TimelineSession, group_rules};
+pub use painel::{
+    OverviewPage, ProducedPage, ProjectOverview, RuleCandidate, RuleGroup, TimelineSession,
+    WeekChanges, group_rules, is_system_page, iso_week_key, origin_counts_by_day, summary_line,
+    weekly_changes,
+};
 pub use reader::{
     ActivityWindow, AgentSessionCount, AuditEvent, AuditLogFilter, AutoImproveCandidateSession,
     AutoImproveParkedClaim, BriefPageBody, BriefingPage, BriefingSnapshot, ClientActivity,

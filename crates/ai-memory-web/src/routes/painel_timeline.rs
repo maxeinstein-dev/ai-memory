@@ -1,10 +1,11 @@
-//! `GET /w/:workspace/:project/linha-do-tempo` — sessions per UTC day, and
-//! the current pages each session produced.
+//! `GET /w/:workspace/:project/linha-do-tempo` — sessions per UTC day, what
+//! each day produced by page kind, and the current pages each session
+//! produced.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use ai_memory_store::{ReaderPool, TimelineSession};
+use ai_memory_store::{ProjectOverview, ReaderPool, TimelineSession, origin_counts_by_day};
 use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -14,7 +15,8 @@ use serde::Deserialize;
 use crate::routes::escopo_html;
 use crate::state::WebState;
 use crate::templates::{
-    ProducedPageRow, TimelineDay, TimelineSessionRow, TimelineView, page_href, project_href,
+    PAGE_KIND_ORDER, ProducedPageRow, TimelineDay, TimelineSessionRow, TimelineView, kind_label_pt,
+    page_href, plural_pt, project_href,
 };
 
 /// Microseconds in a day, used to turn `?dias=` into `since_us`.
@@ -78,12 +80,47 @@ fn day_key(started_us: i64) -> String {
         .unwrap_or_default()
 }
 
+/// What a UTC day produced, by page kind — `"3 decisões · 5 gotchas · 1
+/// conceito"` ([`kind_label_pt`]), [`PAGE_KIND_ORDER`] kinds first, then any
+/// other kind sorted alphabetically, zeros omitted throughout. Empty string
+/// (never a lone `·`) when the day has no entry at all in
+/// `counts_by_day` — a day can have sessions but no page with an origin
+/// date that lands on it.
+fn day_kind_summary(date: &str, counts_by_day: &BTreeMap<String, BTreeMap<String, u32>>) -> String {
+    let Some(counts) = counts_by_day.get(date) else {
+        return String::new();
+    };
+    let mut parts: Vec<String> = Vec::new();
+    for kind in PAGE_KIND_ORDER {
+        if let Some(&n) = counts.get(kind)
+            && n > 0
+        {
+            parts.push(kind_label_pt(kind, n as usize));
+        }
+    }
+    let mut extra: Vec<(&str, u32)> = counts
+        .iter()
+        .filter(|(k, _)| !PAGE_KIND_ORDER.contains(&k.as_str()))
+        .map(|(k, &n)| (k.as_str(), n))
+        .collect();
+    extra.sort_by_key(|&(k, _)| k);
+    for (kind, n) in extra {
+        if n > 0 {
+            parts.push(kind_label_pt(kind, n as usize));
+        }
+    }
+    parts.join(" · ")
+}
+
 /// Group sessions by UTC day (most recent day first) and compute each day's
-/// bar width relative to the day with the most sessions in the window.
+/// bar width relative to the day with the most sessions in the window, plus
+/// the day's labelled session count and per-kind production summary (§2.3
+/// of `docs/alfama/specs/2026-09-25-visao-geral-design.md`).
 fn group_by_day(
     sessions: Vec<TimelineSession>,
     workspace: &str,
     project: &str,
+    counts_by_day: &BTreeMap<String, BTreeMap<String, u32>>,
 ) -> Vec<TimelineDay> {
     let mut by_day: BTreeMap<String, Vec<TimelineSession>> = BTreeMap::new();
     for session in sessions {
@@ -98,6 +135,7 @@ fn group_by_day(
         .rev()
         .map(|(date, sessions)| {
             let count = sessions.len();
+            let kind_summary = day_kind_summary(&date, counts_by_day);
             let rows = sessions
                 .into_iter()
                 .map(|s| TimelineSessionRow {
@@ -118,8 +156,9 @@ fn group_by_day(
                 .collect();
             TimelineDay {
                 date,
-                count,
                 pct: (count * 100 / max_count).min(100),
+                sessions_label: plural_pt(count, "sessão", "sessões"),
+                kind_summary,
                 sessions: rows,
             }
         })
@@ -145,11 +184,22 @@ pub(crate) async fn handler(
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
+    // Same query the project overview uses for its "Em números"/"Sem data de
+    // origem" sections — reused here, not duplicated, for the per-day kind
+    // breakdown (each page counted once, on its origin day).
+    let overview: ProjectOverview = match state.reader.project_overview(ws, proj).await {
+        Ok(o) => o,
+        Err(err) => {
+            tracing::error!(error = %err, "loading project overview for the timeline's per-day counts");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let counts_by_day = origin_counts_by_day(&overview);
     let view = TimelineView {
         base_href: project_href(&workspace, &project),
         aba: "linha",
         dias,
-        days: group_by_day(sessions, &workspace, &project),
+        days: group_by_day(sessions, &workspace, &project, &counts_by_day),
         workspace,
         project,
     };
