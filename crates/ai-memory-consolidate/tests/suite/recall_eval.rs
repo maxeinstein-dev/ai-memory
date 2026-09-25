@@ -354,6 +354,7 @@ async fn raw_observation_fallback_recovers_detail_when_wiki_misses() {
     store
         .writer
         .begin_session(NewSession {
+            occurred_at: None,
             id: session_id,
             workspace_id: ws,
             project_id: proj,
@@ -367,6 +368,7 @@ async fn raw_observation_fallback_recovers_detail_when_wiki_misses() {
         .writer
         .insert_observation(Sanitized::new(
             NewObservation {
+                occurred_at: None,
                 session_id,
                 workspace_id: ws,
                 project_id: proj,

@@ -142,6 +142,14 @@ pub(crate) enum WriteCmd {
         handoff: NewHandoff,
         reply: oneshot::Sender<StoreResult<HandoffId>>,
     },
+    SetSessionTimes {
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        session_id: SessionId,
+        started_us: i64,
+        ended_us: Option<i64>,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     EndLifecycleOnlySession {
         session_id: SessionId,
         reply: oneshot::Sender<StoreResult<LifecycleOnlyEndOutcome>>,
@@ -169,16 +177,19 @@ pub(crate) enum WriteCmd {
     EndAdmittedSession {
         admitted: AdmittedSession,
         summary_page_id: Option<PageId>,
+        occurred_at: Option<i64>,
         reply: oneshot::Sender<StoreResult<()>>,
     },
     EndAdmittedSessionWithHandoff {
         admitted: AdmittedSession,
         summary_page_id: Option<PageId>,
         handoff: NewHandoff,
+        occurred_at: Option<i64>,
         reply: oneshot::Sender<StoreResult<HandoffId>>,
     },
     EndAdmittedLifecycleOnlySession {
         admitted: AdmittedSession,
+        occurred_at: Option<i64>,
         reply: oneshot::Sender<StoreResult<LifecycleOnlyEndOutcome>>,
     },
     CompleteObservationIngest {
@@ -919,6 +930,35 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Overwrite one session's `started_at`/`ended_at`, scoped by
+    /// `(workspace_id, project_id)`. Used only by the offline
+    /// `ai-memory repair-backfill-timestamps` command (fork-only) to correct
+    /// sessions `backfill` imported before it carried `occurred_at`; see
+    /// [`crate::ops::set_session_times`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn set_session_times(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        session_id: SessionId,
+        started_us: i64,
+        ended_us: Option<i64>,
+    ) -> StoreResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::SetSessionTimes {
+            workspace_id,
+            project_id,
+            session_id,
+            started_us,
+            ended_us,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Atomically end a session and insert its automatic handoff.
     ///
     /// # Errors
@@ -1041,15 +1081,20 @@ impl WriterHandle {
     }
 
     /// Guarded hook end.
+    ///
+    /// `occurred_at` is the SessionEnd event's own original time (microseconds),
+    /// when known; `None` falls back to "now" at the store boundary.
     pub async fn end_admitted_session(
         &self,
         admitted: AdmittedSession,
         summary_page_id: Option<PageId>,
+        occurred_at: Option<i64>,
     ) -> StoreResult<()> {
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::EndAdmittedSession {
             admitted,
             summary_page_id,
+            occurred_at,
             reply: tx,
         })
         .await?;
@@ -1057,17 +1102,22 @@ impl WriterHandle {
     }
 
     /// Guarded hook end plus automatic handoff.
+    ///
+    /// `occurred_at` is the SessionEnd event's own original time (microseconds),
+    /// when known; `None` falls back to "now" at the store boundary.
     pub async fn end_admitted_session_with_handoff(
         &self,
         admitted: AdmittedSession,
         summary_page_id: Option<PageId>,
         handoff: NewHandoff,
+        occurred_at: Option<i64>,
     ) -> StoreResult<HandoffId> {
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::EndAdmittedSessionWithHandoff {
             admitted,
             summary_page_id,
             handoff,
+            occurred_at,
             reply: tx,
         })
         .await?;
@@ -1075,13 +1125,18 @@ impl WriterHandle {
     }
 
     /// Guarded hook lifecycle-only end.
+    ///
+    /// `occurred_at` is the SessionEnd event's own original time (microseconds),
+    /// when known; `None` falls back to "now" at the store boundary.
     pub async fn end_admitted_lifecycle_only_session(
         &self,
         admitted: AdmittedSession,
+        occurred_at: Option<i64>,
     ) -> StoreResult<LifecycleOnlyEndOutcome> {
         let (tx, rx) = oneshot::channel();
         self.send(WriteCmd::EndAdmittedLifecycleOnlySession {
             admitted,
+            occurred_at,
             reply: tx,
         })
         .await?;
@@ -2815,6 +2870,24 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 let result = ops::end_session(&mut conn, &session_id, summary_page_id.as_ref());
                 send_or_warn(reply, result, "end_session");
             }
+            WriteCmd::SetSessionTimes {
+                workspace_id,
+                project_id,
+                session_id,
+                started_us,
+                ended_us,
+                reply,
+            } => {
+                let result = ops::set_session_times(
+                    &conn,
+                    workspace_id,
+                    project_id,
+                    &session_id,
+                    started_us,
+                    ended_us,
+                );
+                send_or_warn(reply, result, "set_session_times");
+            }
             WriteCmd::EndSessionWithHandoff {
                 session_id,
                 summary_page_id,
@@ -2871,16 +2944,22 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::EndAdmittedSession {
                 admitted,
                 summary_page_id,
+                occurred_at,
                 reply,
             } => {
-                let result =
-                    ops::end_admitted_session(&mut conn, &admitted, summary_page_id.as_ref());
+                let result = ops::end_admitted_session(
+                    &mut conn,
+                    &admitted,
+                    summary_page_id.as_ref(),
+                    occurred_at,
+                );
                 send_or_warn(reply, result, "end_admitted_session");
             }
             WriteCmd::EndAdmittedSessionWithHandoff {
                 admitted,
                 summary_page_id,
                 handoff,
+                occurred_at,
                 reply,
             } => {
                 let result = ops::end_admitted_session_with_handoff(
@@ -2888,11 +2967,17 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                     &admitted,
                     summary_page_id.as_ref(),
                     &handoff,
+                    occurred_at,
                 );
                 send_or_warn(reply, result, "end_admitted_session_with_handoff");
             }
-            WriteCmd::EndAdmittedLifecycleOnlySession { admitted, reply } => {
-                let result = ops::end_admitted_lifecycle_only_session(&mut conn, &admitted);
+            WriteCmd::EndAdmittedLifecycleOnlySession {
+                admitted,
+                occurred_at,
+                reply,
+            } => {
+                let result =
+                    ops::end_admitted_lifecycle_only_session(&mut conn, &admitted, occurred_at);
                 send_or_warn(reply, result, "end_admitted_lifecycle_only_session");
             }
             WriteCmd::CompleteObservationIngest {
@@ -3901,6 +3986,7 @@ mod tests {
         store
             .writer
             .begin_session(NewSession {
+                occurred_at: None,
                 id: sid,
                 workspace_id: ws,
                 project_id: src,

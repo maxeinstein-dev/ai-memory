@@ -107,6 +107,12 @@ pub enum Command {
     /// each scope's `_meta.md` manifest and reindexes every page. Run with the
     /// server stopped, against a freshly-migrated (clean) data dir.
     Reindex(ReindexArgs),
+    /// Fork-only: correct `sessions.started_at`/`ended_at` for sessions that
+    /// `backfill` imported before it carried the transcript's own event
+    /// times, by re-reading the local transcripts and matching them by
+    /// session id. Dry-run by default; run `ai-memory backup` first and stop
+    /// the server before `--apply`.
+    RepairBackfillTimestamps(RepairBackfillTimestampsArgs),
     /// Print (or apply) lifecycle-hook configuration for an agent CLI.
     InstallHooks(InstallHooksArgs),
     /// Emit a single lifecycle hook natively (reads the event payload
@@ -1583,6 +1589,37 @@ pub struct RestorePageArgs {
 /// Arguments for `reindex`.
 #[derive(Debug, Args)]
 pub struct ReindexArgs {}
+
+/// Arguments for `repair-backfill-timestamps`.
+///
+/// Take a backup first: run `ai-memory backup` with the server stopped before
+/// `--apply`. This command writes to `sessions.started_at`/`ended_at` through
+/// the writer, offline, and only after confirming no sibling `ai-memory`
+/// process is alive.
+#[derive(Debug, Args)]
+pub struct RepairBackfillTimestampsArgs {
+    /// Workspace name. Defaults to the current project's resolved scope.
+    #[arg(long)]
+    pub workspace: Option<String>,
+    /// Project to repair. Required: only this project's sessions are listed
+    /// or rewritten.
+    #[arg(long)]
+    pub project: String,
+    /// Root directory to search transcripts under, overriding the default
+    /// discovery root `backfill` uses (`<home>/.claude/projects`). Use this
+    /// to point at a read-only mount of the operator's transcripts inside a
+    /// one-off container (e.g. `-v ~/.claude/projects:/transcripts:ro` then
+    /// `--transcripts-dir /transcripts`). Sessions are matched purely by
+    /// session id, regardless of which subfolder under this root the
+    /// transcript lives in.
+    #[arg(long)]
+    pub transcripts_dir: Option<PathBuf>,
+    /// Apply the computed times. Without this flag the command only reports
+    /// what would change (sessions matched/unmatched, the date range before
+    /// and after). Refused while another `ai-memory` process is running.
+    #[arg(long)]
+    pub apply: bool,
+}
 
 /// Agent CLI to install hooks/extensions for. For MCP-only clients
 /// (Claude Desktop), use `install-mcp --client <name>` instead.

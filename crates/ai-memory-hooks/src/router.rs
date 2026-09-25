@@ -1361,6 +1361,7 @@ async fn fetch_and_accept_handoff(
     let receiving_session = if handoff.is_some() {
         match accepting_session {
             Some(id) => Some(NewSession {
+                occurred_at: None,
                 id,
                 workspace_id: ws,
                 project_id: proj,
@@ -2386,6 +2387,7 @@ async fn process_authorized(
             agent_kind: env.agent,
             cwd: env.cwd.as_ref().map(std::path::PathBuf::from),
             actor_user: owner_stamp.clone(),
+            occurred_at: env.occurred_at_micros(),
         };
         let kind = env.event.to_observation_kind();
         let raw_obs = NewObservation {
@@ -2401,6 +2403,7 @@ async fn process_authorized(
                 .unwrap_or_else(|| kind.as_str().to_string()),
             body: env.body_excerpt.clone().unwrap_or_default(),
             importance: importance_for(env.event),
+            occurred_at: env.occurred_at_micros(),
         };
         let sanitized = Sanitized::new(raw_obs, &state.sanitizer);
         let log_title = sanitized.inner().title.clone();
@@ -2586,7 +2589,7 @@ async fn process_authorized(
         if is_ephemeral_session(&observations) {
             let outcome = state
                 .writer
-                .end_admitted_lifecycle_only_session(admitted.clone())
+                .end_admitted_lifecycle_only_session(admitted.clone(), env.occurred_at_micros())
                 .await?;
             match outcome {
                 ai_memory_store::LifecycleOnlyEndOutcome::Ended { reopened_handoff } => {
@@ -2715,13 +2718,18 @@ async fn process_authorized(
             Some(handoff) => Some(
                 state
                     .writer
-                    .end_admitted_session_with_handoff(admitted.clone(), Some(page_id), handoff)
+                    .end_admitted_session_with_handoff(
+                        admitted.clone(),
+                        Some(page_id),
+                        handoff,
+                        env.occurred_at_micros(),
+                    )
                     .await?,
             ),
             None => {
                 state
                     .writer
-                    .end_admitted_session(admitted.clone(), Some(page_id))
+                    .end_admitted_session(admitted.clone(), Some(page_id), env.occurred_at_micros())
                     .await?;
                 None
             }
@@ -3501,6 +3509,7 @@ mod tests {
         state
             .writer
             .begin_session(NewSession {
+                occurred_at: None,
                 id: session_id,
                 workspace_id: state.workspace_id,
                 project_id: state.project_id,
@@ -3515,6 +3524,7 @@ mod tests {
             .insert_observation_ingest(
                 Sanitized::new(
                     NewObservation {
+                        occurred_at: None,
                         session_id,
                         workspace_id: state.workspace_id,
                         project_id: state.project_id,
@@ -4684,6 +4694,7 @@ mod tests {
         let pending_obs = || {
             Sanitized::new(
                 NewObservation {
+                    occurred_at: None,
                     session_id,
                     workspace_id: ws,
                     project_id: proj,
@@ -7272,6 +7283,7 @@ mod tests {
                     .insert_observation_ingest(
                         Sanitized::new(
                             NewObservation {
+                                occurred_at: None,
                                 session_id,
                                 workspace_id: state.workspace_id,
                                 project_id: state.project_id,
@@ -8113,6 +8125,7 @@ mod tests {
             state
                 .writer
                 .begin_session(NewSession {
+                    occurred_at: None,
                     id,
                     workspace_id: state.workspace_id,
                     project_id,
@@ -8213,6 +8226,7 @@ mod tests {
             state
                 .writer
                 .begin_session(NewSession {
+                    occurred_at: None,
                     id,
                     workspace_id: state.workspace_id,
                     project_id,
@@ -9355,6 +9369,7 @@ mod tests {
         state
             .writer
             .begin_session(NewSession {
+                occurred_at: None,
                 id: sid,
                 workspace_id: state.workspace_id,
                 project_id: target,
@@ -9494,6 +9509,7 @@ mod tests {
         let pending_observation = || {
             Sanitized::new(
                 NewObservation {
+                    occurred_at: None,
                     session_id,
                     workspace_id,
                     project_id,
@@ -9983,6 +9999,7 @@ mod tests {
             state
                 .writer
                 .begin_session(NewSession {
+                    occurred_at: None,
                     id: session_id,
                     workspace_id: state.workspace_id,
                     project_id: state.project_id,

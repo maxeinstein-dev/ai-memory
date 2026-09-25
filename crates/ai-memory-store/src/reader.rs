@@ -751,6 +751,18 @@ pub struct SessionSummary {
     pub actor_user: Option<String>,
 }
 
+/// One session's raw microsecond times, as read by
+/// [`ReaderPool::session_times_for_scope`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionTimes {
+    /// Session id.
+    pub session_id: SessionId,
+    /// `sessions.started_at`, microseconds since the Unix epoch.
+    pub started_us: i64,
+    /// `sessions.ended_at`, or `None` while the session is open.
+    pub ended_us: Option<i64>,
+}
+
 /// Aggregate MCP tool-call counts for one client, from
 /// `client_activity` — the MCP-only complement to
 /// [`AgentSessionCount`]: hook-less clients (VS Code Copilot, Claude
@@ -3098,6 +3110,44 @@ impl ReaderPool {
                 out.push(OpenSession {
                     session_id: SessionId::from_slice(&id_bytes)?,
                     cwd,
+                });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// Every session row anchored in one scope, with its raw microsecond
+    /// `started_at`/`ended_at` — for `ai-memory repair-backfill-timestamps`
+    /// (fork-only offline repair), which needs the exact stored value rather
+    /// than [`SessionSummary`]'s formatted timestamps. Scoped by
+    /// `(workspace_id, project_id)` in the `WHERE` clause: the command's
+    /// `--project` guard starts here, not only in the write it later issues.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn session_times_for_scope(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+    ) -> StoreResult<Vec<SessionTimes>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, started_at, ended_at FROM sessions \
+                 WHERE workspace_id = ?1 AND project_id = ?2",
+            )?;
+            let rows: Vec<(Vec<u8>, i64, Option<i64>)> = stmt
+                .query_map(
+                    params![workspace_id.as_bytes(), project_id.as_bytes()],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )?
+                .collect::<Result<_, _>>()?;
+            let mut out = Vec::with_capacity(rows.len());
+            for (id_bytes, started_us, ended_us) in rows {
+                out.push(SessionTimes {
+                    session_id: SessionId::from_slice(&id_bytes)?,
+                    started_us,
+                    ended_us,
                 });
             }
             Ok(out)
@@ -10506,6 +10556,7 @@ mod tests {
             store
                 .writer
                 .begin_session(NewSession {
+                    occurred_at: None,
                     id: session_id,
                     workspace_id,
                     project_id,

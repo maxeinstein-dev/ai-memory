@@ -1188,6 +1188,7 @@ async fn seed_session(
     store
         .writer
         .begin_session(ai_memory_core::NewSession {
+            occurred_at: None,
             id: session_id,
             workspace_id: ws,
             project_id: proj,
@@ -1202,6 +1203,7 @@ async fn seed_session(
             .writer
             .insert_observation(ai_memory_core::Sanitized::new(
                 ai_memory_core::NewObservation {
+                    occurred_at: None,
                     session_id,
                     workspace_id: ws,
                     project_id: proj,

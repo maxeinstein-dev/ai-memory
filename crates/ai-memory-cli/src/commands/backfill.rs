@@ -354,6 +354,9 @@ async fn import_one(
 
     let sid = &session.native_session_id;
     let agent = session.harness.agent_kind().as_str();
+    let occurred_ats = resolve_occurred_at(&transcript.events);
+    // The session starts at its first timestamped event, not at import time.
+    let first_occurred_at = occurred_ats.iter().flatten().next().cloned();
     let mut items = Vec::with_capacity(transcript.events.len() + 2);
     items.push(hook_item(
         endpoint,
@@ -364,11 +367,11 @@ async fn import_one(
         sid,
         &format!("{sid}:session-start"),
         None,
-        serde_json::json!({ "session_id": sid }),
+        serde_json::json!({ "session_id": sid, "occurred_at": first_occurred_at }),
     )?);
     let mut content = 0usize;
-    for event in &transcript.events {
-        if let Some(mapped) = map_event(sid, event) {
+    for (event, occurred_at) in transcript.events.iter().zip(&occurred_ats) {
+        if let Some(mapped) = map_event(sid, event, occurred_at.as_deref()) {
             items.push(hook_item(
                 endpoint,
                 workspace,
@@ -383,6 +386,7 @@ async fn import_one(
             content += 1;
         }
     }
+    let last_occurred_at = occurred_ats.into_iter().next_back().flatten();
     items.push(hook_item(
         endpoint,
         workspace,
@@ -392,11 +396,28 @@ async fn import_one(
         sid,
         &format!("{sid}:session-end"),
         None,
-        serde_json::json!({ "session_id": sid }),
+        serde_json::json!({ "session_id": sid, "occurred_at": last_occurred_at }),
     )?);
 
     post_hook_items(endpoint, &items).await?;
     Ok(content)
+}
+
+/// Resolve each event's effective `occurred_at`, letting one missing its own
+/// timestamp inherit the nearest preceding event's (spec §4). The last entry
+/// is therefore also the session's last known event time, used for the
+/// synthetic `session-end` item.
+fn resolve_occurred_at(events: &[NewWorkstreamEvent]) -> Vec<Option<String>> {
+    let mut last: Option<String> = None;
+    events
+        .iter()
+        .map(|event| {
+            if event.occurred_at.is_some() {
+                last = event.occurred_at.clone();
+            }
+            last.clone()
+        })
+        .collect()
 }
 
 /// A transcript event mapped to its `/hook` shape.
@@ -411,7 +432,18 @@ struct MappedEvent {
 /// `user-prompt` observation; every other content-bearing event is recorded as
 /// a backfill extension observation. Non-content boundary events (compaction,
 /// checkpoint, annotation) are dropped — they are not session content.
-fn map_event(session_id: &str, event: &NewWorkstreamEvent) -> Option<MappedEvent> {
+///
+/// `occurred_at` is the event's own original time (RFC 3339), already resolved
+/// by the caller — an event missing its own timestamp inherits the nearest
+/// preceding one, so this always reflects a real point in the transcript when
+/// any event in it carried one. It rides in the hook body next to the other
+/// event fields; the receiving `/hook` endpoint parses and bounds it (see
+/// `HookEnvelope::occurred_at_micros`) before it ever reaches storage.
+fn map_event(
+    session_id: &str,
+    event: &NewWorkstreamEvent,
+    occurred_at: Option<&str>,
+) -> Option<MappedEvent> {
     let content = event.content.trim();
     if content.is_empty() {
         return None;
@@ -423,7 +455,11 @@ fn map_event(session_id: &str, event: &NewWorkstreamEvent) -> Option<MappedEvent
             event: "user-prompt".to_string(),
             source_event: None,
             ingest_key,
-            body: serde_json::json!({ "session_id": session_id, "prompt": event.content }),
+            body: serde_json::json!({
+                "session_id": session_id,
+                "prompt": event.content,
+                "occurred_at": occurred_at,
+            }),
         }),
         WorkstreamEventKind::Message
         | WorkstreamEventKind::ToolCall
@@ -442,6 +478,7 @@ fn map_event(session_id: &str, event: &NewWorkstreamEvent) -> Option<MappedEvent
                     "session_id": session_id,
                     "title": first_line(content),
                     "message": event.content,
+                    "occurred_at": occurred_at,
                 }),
             })
         }
@@ -660,6 +697,7 @@ mod tests {
         let m = map_event(
             "sid",
             &event(WorkstreamEventKind::Message, Some("user"), "do the thing"),
+            Some("2026-09-10T12:00:00Z"),
         )
         .expect("user message maps");
         assert_eq!(m.event, "user-prompt");
@@ -668,6 +706,7 @@ mod tests {
             "user-prompt is a lifecycle event, not an extension"
         );
         assert_eq!(m.body["prompt"], "do the thing");
+        assert_eq!(m.body["occurred_at"], "2026-09-10T12:00:00Z");
         assert_eq!(
             m.ingest_key, "sid:evt-1",
             "ingest key is stable per source event"
@@ -683,6 +722,7 @@ mod tests {
                 Some("assistant"),
                 "here is the plan\nline2",
             ),
+            None,
         )
         .expect("assistant maps");
         assert_eq!(a.event, "backfill.assistant-message");
@@ -692,10 +732,15 @@ mod tests {
             "title is the first line"
         );
         assert_eq!(a.body["message"], "here is the plan\nline2");
+        assert!(
+            a.body["occurred_at"].is_null(),
+            "no occurred_at was supplied"
+        );
 
         let t = map_event(
             "sid",
             &event(WorkstreamEventKind::ToolCall, None, "grep foo"),
+            None,
         )
         .expect("tool call maps");
         assert_eq!(t.event, "backfill.tool_call");
@@ -703,11 +748,43 @@ mod tests {
     }
 
     #[test]
+    fn resolve_occurred_at_fills_gaps_from_the_preceding_event() {
+        let mut e1 = event(WorkstreamEventKind::Message, Some("user"), "one");
+        e1.occurred_at = Some("2026-09-10T12:00:00Z".to_string());
+        let e2 = event(WorkstreamEventKind::Message, Some("assistant"), "two"); // no timestamp
+        let mut e3 = event(WorkstreamEventKind::ToolCall, None, "three");
+        e3.occurred_at = Some("2026-09-10T12:05:00Z".to_string());
+        let e4 = event(WorkstreamEventKind::ToolResult, None, "four"); // no timestamp
+
+        let resolved = resolve_occurred_at(&[e1, e2, e3, e4]);
+        assert_eq!(
+            resolved,
+            vec![
+                Some("2026-09-10T12:00:00Z".to_string()),
+                Some("2026-09-10T12:00:00Z".to_string()),
+                Some("2026-09-10T12:05:00Z".to_string()),
+                Some("2026-09-10T12:05:00Z".to_string()),
+            ],
+            "an event without its own timestamp inherits the nearest preceding one"
+        );
+    }
+
+    #[test]
+    fn resolve_occurred_at_stays_none_when_nothing_has_a_timestamp() {
+        let events = vec![
+            event(WorkstreamEventKind::Message, Some("user"), "one"),
+            event(WorkstreamEventKind::Message, Some("assistant"), "two"),
+        ];
+        assert_eq!(resolve_occurred_at(&events), vec![None, None]);
+    }
+
+    #[test]
     fn empty_and_boundary_events_are_dropped() {
         assert!(
             map_event(
                 "sid",
-                &event(WorkstreamEventKind::Message, Some("user"), "   ")
+                &event(WorkstreamEventKind::Message, Some("user"), "   "),
+                None,
             )
             .is_none(),
             "whitespace-only content is not an observation"
@@ -718,7 +795,7 @@ mod tests {
             WorkstreamEventKind::Annotation,
         ] {
             assert!(
-                map_event("sid", &event(kind, None, "boundary")).is_none(),
+                map_event("sid", &event(kind, None, "boundary"), None).is_none(),
                 "{kind:?} is not session content"
             );
         }

@@ -5492,6 +5492,7 @@ mod tests {
         store
             .writer
             .begin_session(ai_memory_core::NewSession {
+                occurred_at: None,
                 id: sid,
                 workspace_id: ws,
                 project_id: src,
