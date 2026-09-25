@@ -47,7 +47,7 @@
     </ul>
     {% endif %}
     {% if !week.new_or_updated_concepts.is_empty() %}
-    <p class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mt-3">Conceitos novos ou atualizados</p>
+    <p class="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500 mt-3">Conceitos e fatos novos ou atualizados</p>
     <ul class="list-disc pl-5 text-sm text-slate-700 dark:text-slate-300 space-y-0.5">
       {% for p in week.new_or_updated_concepts %}
       <li><a href="{{ p.href }}" class="text-blue-600 dark:text-blue-400 hover:underline">{{ p.title }}</a></li>

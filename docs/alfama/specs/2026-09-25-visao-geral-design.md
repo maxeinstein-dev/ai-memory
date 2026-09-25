@@ -124,10 +124,14 @@ com backup.
 
 ## Verificação (nos dados reais, depois da troca)
 
-1. A página do `aw-senai-sgw` abre na Visão geral, com 88 decisões, 56 conceitos, 109 gotchas, 3 regras
-   e 98 sessões.
+1. A página do `aw-senai-sgw` abre na Visão geral com 88 decisões, 27 conceitos, 29 fatos, 109 gotchas e
+   3 regras.
+   - Correção medida na implementação: das 56 páginas da pasta `concepts/`, 29 têm `kind: fact` no
+     frontmatter, e o tipo vem de `page_kind_expr` (frontmatter antes da pasta).
+   - Os fatos entram em "Em números" e ao lado dos conceitos em "Últimas grandes mudanças".
 2. "Decisões recentes" traz datas entre 2026-08-04 e 2026-09-24, não 2026-09-24 para todas.
-3. "Sem data de origem" mostra 13 decisões, 27 conceitos e 9 gotchas.
+3. "Sem data de origem" mostra 13 decisões, 27 conceitos e 9 gotchas. Os 29 fatos têm todos sessão de
+   origem.
 4. Na Linha do tempo, `2026-09-17` mostra `8 sessões` e as contagens do que o dia produziu.
 
 ## O que esta spec NÃO entrega

@@ -45,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (now the project's entry point), summarizing what a project decided,
   learned, and changed: a count per page kind plus the session count and the
   period covered ("Em números"); the most recent active ISO weeks with their
-  new decisions, new/updated concepts, and top-producing session ("Últimas
+  new decisions, new/updated concepts and facts, and top-producing session ("Últimas
   grandes mudanças"); the 10 most recent decisions and gotchas by origin
   date, each with a one-line summary; the briefing's core pages ("Conceitos
   centrais"); and a count per kind of pages with no session evidence at all

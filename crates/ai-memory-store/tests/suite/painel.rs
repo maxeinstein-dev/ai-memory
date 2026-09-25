@@ -1219,6 +1219,36 @@ fn weekly_changes_distinguishes_new_concepts_from_updated_ones() {
     );
 }
 
+/// Consolidation files many learned facts under `concepts/` with a `fact`
+/// kind; they belong with the week's concepts, while other kinds do not.
+#[test]
+fn weekly_changes_lists_new_facts_with_concepts() {
+    let week_us = micros("2026-02-02T10:00:00Z");
+    let sid = SessionId::new();
+    let overview = ProjectOverview {
+        pages: vec![
+            overview_page("concepts/a-fact.md", "fact", Some(week_us), vec![week_us]),
+            overview_page(
+                "decisions/a-decision.md",
+                "decision",
+                Some(week_us),
+                vec![week_us],
+            ),
+        ],
+        sessions: vec![(sid, week_us, "claude-code".to_string(), 2)],
+        first_session_us: Some(week_us),
+        last_session_us: Some(week_us),
+    };
+
+    let weeks = weekly_changes(&overview, 4);
+    let paths: Vec<&str> = weeks[0]
+        .new_or_updated_concepts
+        .iter()
+        .map(|p| p.path.as_str())
+        .collect();
+    assert_eq!(paths, vec!["concepts/a-fact.md"]);
+}
+
 /// Ties on pages produced break toward the earlier session start.
 #[test]
 fn weekly_changes_top_session_tie_break_prefers_the_earlier_start() {

@@ -138,10 +138,10 @@ pub(crate) fn humanize_pt(iso: &str) -> String {
 /// Fixed display order for the project's non-system page kinds, shared by
 /// the "Em números"/"Sem data de origem" sections of the project overview
 /// and the timeline's per-day kind breakdown, so the two screens never drift
-/// apart on ordering. Any other kind (`note`, `fact`, …) is appended after
-/// these, sorted alphabetically by its caller.
-pub(crate) const PAGE_KIND_ORDER: [&str; 5] =
-    ["decision", "concept", "gotcha", "rule", "procedure"];
+/// apart on ordering. Any other kind (`note`, …) is appended after these,
+/// sorted alphabetically by its caller.
+pub(crate) const PAGE_KIND_ORDER: [&str; 6] =
+    ["decision", "concept", "fact", "gotcha", "rule", "procedure"];
 
 /// `"{n} {singular}"` for `n == 1`, `"{n} {plural}"` otherwise.
 #[must_use]
@@ -149,9 +149,9 @@ pub(crate) fn plural_pt(n: usize, singular: &str, plural: &str) -> String {
     format!("{n} {}", if n == 1 { singular } else { plural })
 }
 
-/// Portuguese count label for a page `kind` (`decision`, `concept`,
+/// Portuguese count label for a page `kind` (`decision`, `concept`, `fact`,
 /// `gotcha`, `rule`, `procedure`), singular/plural — `"1 decisão"`,
-/// `"88 decisões"`. A kind outside that fixed set (`note`, `fact`, a
+/// `"88 decisões"`. A kind outside that fixed set (`note`, a
 /// frontmatter override, …) is shown as-is, without guessing a plural:
 /// `"2 note"`.
 #[must_use]
@@ -159,6 +159,7 @@ pub(crate) fn kind_label_pt(kind: &str, n: usize) -> String {
     let (singular, plural) = match kind {
         "decision" => ("decisão", "decisões"),
         "concept" => ("conceito", "conceitos"),
+        "fact" => ("fato", "fatos"),
         "gotcha" => ("gotcha", "gotchas"),
         "rule" => ("regra", "regras"),
         "procedure" => ("procedimento", "procedimentos"),

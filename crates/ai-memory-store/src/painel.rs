@@ -872,8 +872,11 @@ pub struct WeekChanges {
     /// Decision pages new this week (origin date inside the week), ordered
     /// by origin date (ties broken by path).
     pub new_decisions: Vec<OverviewPage>,
-    /// Concept pages new this week, or with an earlier origin that picked
-    /// up evidence this week ("updated"). Ordered by path.
+    /// Concept and fact pages new this week, or with an earlier origin that
+    /// picked up evidence this week ("updated"). Facts count here because
+    /// consolidation files many learned facts under `concepts/` with a `fact`
+    /// frontmatter kind; leaving them out hid most of what a week taught.
+    /// Ordered by path.
     pub new_or_updated_concepts: Vec<OverviewPage>,
     /// The session that produced the most of this week's pages. Ties break
     /// on the earliest start, then on the lowest session id; `None` only
@@ -926,7 +929,7 @@ pub fn weekly_changes(overview: &ProjectOverview, max_weeks: usize) -> Vec<WeekC
                 .pages
                 .iter()
                 .filter(|p| {
-                    p.kind == "concept"
+                    matches!(p.kind.as_str(), "concept" | "fact")
                         && (page_is_new_in_week(p, year, week)
                             || page_is_updated_in_week(p, year, week))
                 })
