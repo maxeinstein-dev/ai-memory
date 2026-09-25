@@ -94,6 +94,57 @@ uso único). Em 2026-09-25 uma verificação por esse endpoint consumiu o handof
 ser recriado. A paridade prévia = hook é garantida pela função compartilhada (`build_session_brief`) e pelo
 teste; conferência ao vivo só lendo um início de sessão real, ou com `memory_handoff_list` vazio antes.
 
+## 2.2. Fluxo de trabalho do fork (alinhado ao original)
+
+Decisão do dono (2026-09-25): o fork segue as convenções de fluxo de trabalho do original onde elas não
+colidirem com o modelo de entrega em fases (§6).
+
+- **Commits:** conventional commits em inglês, com `(#N)` do PR que os traz (o número do PR do fork, não
+  do original). Os textos visíveis das telas continuam em português (§2), só a mensagem de commit é em
+  inglês, como no original.
+- **Branches por tipo, não por fase:** `alfama/feat-<assunto>`, `alfama/fix-<assunto>`,
+  `alfama/docs-<assunto>` — um assunto por PR (ver §6 para como isso reparte a Fase 2 em três PRs). Uma
+  contribuição de volta para o original sai de `upstream/main`, com o nome no padrão dele
+  (`fix/<nº-da-issue>-<assunto>`), não no padrão do fork.
+- **Conferir autoria antes de todo push:**
+  `git log --format='%h %an <%ae>' $(git merge-base HEAD origin/alfama/main)..HEAD` — o autor esperado é
+  o e-mail da conta GitHub do dono, já correto na config local do clone. Se escapar um commit com autoria
+  errada, corrige-se **na branch do PR, antes do merge** (`commit --amend`/`rebase -i` ainda não
+  compartilhados). Uma vez que a branch já foi compartilhada (PR aberto, outro clone buscou), a correção
+  de histórico já publicado é por **`.mailmap`** (como o `.mailmap` do próprio fork, que já mapeia um
+  identity de um contribuidor do original) — **nunca reescrita** de histórico compartilhado. A reescrita
+  de histórico feita em 2026-09-25 (branch `alfama/main` local) foi uma **exceção**: aconteceu antes de
+  qualquer outro clone existir, então nada foi compartilhado ainda.
+- **Gates do original antes do push:** `cargo fmt --all -- --check`, `git diff --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`, a suíte de testes (fato 2 do plano) — os mesmos
+  do `AGENTS.md` do original. `cargo deny` e `cargo audit` continuam no CI (§2.1), não no gate local (sem
+  toolchain Rust no Windows para instalar as ferramentas extras sem custo).
+- **CHANGELOG é trava de merge:** toda mudança visível ao usuário ganha uma entrada em `CHANGELOG.md`
+  `[Unreleased]` (`### Added`/`### Changed`/`### Fixed`, no passado, com `(#N)` do PR) **no mesmo PR** que
+  a introduz — no estilo das entradas de 2.4.0. Um PR sem entrada, quando a mudança é visível ao usuário,
+  não fecha.
+- **Corpo do PR** segue `.github/pull_request_template.md` (herdado do original: What changed / Why /
+  Test plan / Commit attribution / Release impact / CHANGELOG / Notes for reviewers), acrescido do
+  checklist de segurança da §2.1 (rotas novas só GET e dentro do router protegido; nenhuma escrita fora do
+  `WriterHandle`; nenhum texto novo armazenado sem o sanitizador; nenhuma dependência nova; `|safe` só em
+  saída de `markdown::render`; handoffs com `OwnerFilter`; CI verde).
+- **Teste adversarial obrigatório em toda fronteira de segurança.** Regra do `AGENTS.md` do `main` do
+  original (posterior à `v2.4.0` deste fork — citada aqui porque ainda não chegou por rebase): *"Any
+  handler that takes a bare `session_id`/`run_id`/`page_id`/message id, or fans out across projects
+  (`global=true`, global `recent`, search), bypasses scope resolution by construction — it must
+  resolve→authorize (or filter-before-`LIMIT`) and carry an adversarial test proving a foreign id/scope
+  is refused."* Aplicado ao painel: todo ponto de entrada novo que aceita um id cru (sessão, página,
+  proposta, handoff, mensagem) ou lê entre projetos é **culpado até um teste provar** que recusa escopo ou
+  id alheio. O teste (a) tenta a violação, (b) afirma a recusa, (c) inclui um controle legítimo (para não
+  confundir uma negação cega com um guard funcionando), e (d) prova que morde: falha quando o guard é
+  removido, passa com ele. A linha correspondente em `docs/security-boundaries.md` (§2.1) é atualizada no
+  mesmo PR.
+- **PR por fase, merge pelo dono.** Diferente do mantenedor original (que comita direto no tronco em
+  parte dos casos), no fork nenhum PR entra sem revisão e merge explícitos do dono — nunca commit direto
+  em `alfama/main`.
+- **Sincronizar com o original:** a cada release do original, rebase de `alfama/main` sobre a nova tag +
+  gate completo (já descrito em §6).
+
 ## 3. As quatro telas
 
 ### 3.1. Briefing — `/w/{workspace}/{project}/briefing`
@@ -233,3 +284,6 @@ naquela rota, sem afetar MCP, hooks ou a `/web` original.
 - Publicar a imagem num registro (GHCR) em vez de compilar localmente.
 - Transferir o fork para a organização alfamaweb.
 - Se a correção das datas vai para o original antes ou depois de rodar no fork.
+- Automatizar release no estilo `bin/release` do original (bump de versão, mover `[Unreleased]` do
+  `CHANGELOG.md`, tag): só faz sentido se o fork passar a publicar a imagem (item acima, também não
+  decidido); enquanto a imagem é só compilada localmente, o corte de versão do fork continua manual.

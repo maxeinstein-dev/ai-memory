@@ -7,7 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- (fork alfama) A `/web` Briefing tab, at
+  `/web/w/{workspace}/{project}/briefing`, showing the exact session-start
+  briefing text (rendered and raw Markdown) and a usage bar of characters used
+  against the budget, plus the new tab strip (Páginas/Briefing/Linha do
+  tempo/Propostas) on the project page. Read-only, GET-only, inside the
+  existing protected `/web` router — no new authentication surface. (#1)
+- (fork alfama) A `/web` Linha do tempo tab, at
+  `/web/w/{workspace}/{project}/linha-do-tempo?dias=30`, showing sessions
+  grouped by UTC day (a bar chart plus a per-day list with agent, duration,
+  and observation count) and the current pages each session produced or
+  reaffirmed, with links to them. `dias` accepts 7/30/90 (default 30).
+  Read-only, GET-only, inside the existing protected `/web` router — no new
+  authentication surface. (#3)
+
 ### Changed
+- (fork alfama) The session-briefing renderer (`render_session_brief` and its
+  helpers/constants) moved from `ai-memory-hooks` (private) to
+  `ai_memory_store::brief`, so the session-start hook and the new web Briefing
+  tab call the same function instead of each maintaining their own copy.
+  Behavior-preserving: no change to the briefing text, its budget clamp, or
+  the hook's injection path. (#1)
 - (fork alfama) `ci.yml` also runs on push to `alfama/main`, the fork's
   trunk. GitHub Actions only restores caches from a PR's own ref, its base
   branch or the default branch, and upstream's workflow runs on push to
@@ -15,7 +36,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every fork PR compiled the workspace cold (~9 min for `test`, ~8 min for
   `release-build`). A new fork-only workflow, `alfama-guard.yml`, fails any
   PR whose `ci.yml` drops `alfama/main` from `on.push.branches` (the line a
-  rebase onto upstream would lose), via `scripts/alfama/check-fork-ci.sh`.
+  rebase onto upstream would lose), via `scripts/alfama/check-fork-ci.sh`. (#2)
 
 ## [2.4.0] - 2026-09-21
 

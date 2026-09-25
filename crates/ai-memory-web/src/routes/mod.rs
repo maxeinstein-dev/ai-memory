@@ -17,6 +17,7 @@ mod api;
 mod index;
 mod page;
 pub(crate) mod painel_briefing;
+pub(crate) mod painel_timeline;
 mod project;
 mod search;
 mod statics;
@@ -61,6 +62,10 @@ pub(crate) fn build(state: Arc<WebState>) -> Router {
         .route(
             "/w/{workspace}/{project}/briefing",
             get(painel_briefing::handler),
+        )
+        .route(
+            "/w/{workspace}/{project}/linha-do-tempo",
+            get(painel_timeline::handler),
         )
         .route("/search", get(search::handler))
         .route("/static/tailwind.css", get(statics::tailwind_css))

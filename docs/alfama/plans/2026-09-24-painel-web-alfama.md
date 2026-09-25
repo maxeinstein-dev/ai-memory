@@ -477,8 +477,18 @@ git commit -m "feat(web): tela de Briefing -- o texto exato do inicio de sessao 
 
 ### Tarefa 4: Tailwind, gate e imagem
 
-**Passo 1: CSS** — se algum template novo usa classe que não existia:
-`MSYS_NO_PATHCONV=1 docker run --rm -v "$PWD:/w" -w /w -v ai-memory-cargo:/usr/local/cargo/registry -v ai-memory-target:/target -e CARGO_TARGET_DIR=/target -e TAILWIND_BUILD=1 rust:1.95 cargo build -p ai-memory-web`
+**Passo 1: CSS** — se algum template novo usa classe que não existia, no layout não-root da função `CARGO`
+do fato 1 (`target` dentro da árvore, em `/w/target`, sem `CARGO_TARGET_DIR` fora dela — um
+`CARGO_TARGET_DIR=/target` externo quebra a localização de `hooks/` pelos testes do `cli`), com
+`TAILWIND_BUILD=1` só nesta chamada:
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm --user 1000:1000 -e HOME=/tmp/h \
+  -e CARGO_HOME=/usr/local/cargo -e RUSTUP_HOME=/usr/local/rustup -e TAILWIND_BUILD=1 \
+  -v "$PWD:/w" -w /w -v ai-memory-cargo:/usr/local/cargo/registry -v ai-memory-rustup:/usr/local/rustup \
+  -v ai-memory-target:/w/target rust:1.95 bash -c "mkdir -p /tmp/h && cargo build -p ai-memory-web"
+```
+
 e commitar `crates/ai-memory-web/static/tailwind.css`. Conferir `git diff --stat` (só o CSS muda).
 
 **Passo 2: Gate** (fato 2). Tudo verde.
@@ -507,7 +517,13 @@ contido integralmente (3.846 caracteres).
 
 ---
 
-## Fase 2 — Propostas + Linha do tempo + datas (PR 2)
+## Fase 2 — Propostas + Linha do tempo + datas (três PRs, um assunto cada)
+
+> Decisão do dono (2026-09-25, §2.2 da spec): branches por **tipo de assunto**, não por fase, e um
+> assunto por PR. A Fase 2 deixa de ser um PR só e vira três: `alfama/feat-linha-do-tempo` (Tarefas 5 e
+> 6, gate na Tarefa 7), `alfama/feat-propostas` (Tarefa 8, gate na Tarefa 9), e
+> `alfama/fix-backfill-timestamps` (Tarefas 10 e 11, reparo real e gate na Tarefa 12). O conteúdo técnico
+> das tarefas não muda — só onde cada uma commita/vira PR.
 
 ### Tarefa 5: Consultas da linha do tempo
 
@@ -608,6 +624,18 @@ helper que `reader.rs` já usa para `SessionId` — prefira-o ao `Uuid::from_sli
 **Passo 3: Rodar** `CARGO test -p ai-memory-store painel` → verde. **Commit**
 `feat(store): consulta da linha do tempo com as paginas que cada sessao produziu`.
 
+**Passo 4: Teste adversarial (regra do `AGENTS.md` do `main` do original, §2.2 da spec)** —
+`linha_do_tempo` é um ponto de entrada que lê por `(workspace_id, project_id)`; culpado até um teste provar
+que não vaza. **Já implementado nesta tarefa** (HEAD `d9d2cee7`): `pagina_de_outro_projeto_nao_entra_em_produziu`
+prova que uma página de outro projeto não aparece em `produziu`. **Falta acrescentar** (registrado em
+2026-09-25, decisão do dono): um teste de que uma **sessão** de outro projeto não aparece na linha do tempo
+deste projeto, mesmo com o id da sessão válido — o que existe cobre só o lado das páginas, não o das
+sessões. Formato: semear a sessão no projeto B, chamar `linha_do_tempo` no projeto A e afirmar que ela não
+aparece (controle: a mesma sessão aparece na linha do tempo do projeto B); rodar uma vez com o filtro de
+`project_id` removido da query de `sessions` para confirmar que o teste morde, depois restaurar o filtro.
+Atualizar a linha `alfama-2` de `docs/security-boundaries.md` (FUTURE → STRONG) no mesmo commit/PR desse
+teste.
+
 ---
 
 ### Tarefa 6: Tela da Linha do tempo
@@ -630,9 +658,29 @@ a lista `produziu` com link `w/{ws}/{proj}/p/{path}` (use `page_href`).
 **Passo 3/4:** `CARGO test -p ai-memory-web` verde; commit
 `feat(web): tela da Linha do tempo -- sessoes por dia e o que cada uma produziu`.
 
+**Passo 5: Teste adversarial** — a rota também é um ponto de entrada por `(workspace, project)` cru na URL.
+Estender o teste (c) do Passo 1 (projeto inexistente → 404) com um caso de **projeto existente, mas de
+outro workspace**, para provar que `escopo_html` recusa também esse cruzamento (controle: o mesmo projeto,
+no workspace certo, responde 200); rodar uma vez trocando `lookup_existing_scope` por uma resolução só por
+`project` (ignorando `workspace`) para confirmar que o teste morde, depois desfazer. Atualizar a linha
+`alfama-2` de `docs/security-boundaries.md` para citar também este teste de rota (além do de `painel.rs` da
+Tarefa 5).
+
 ---
 
-### Tarefa 7: Tela de Propostas
+### Tarefa 7: Gate, imagem e PR — `alfama/feat-linha-do-tempo`
+
+1. Tailwind (Passo 1 da Tarefa 4, se algum template novo usa classe nova), gate completo (fato 2).
+2. Imagem `ai-memory-alfama:2.4.0-alfama.2`; troca no compose (backup antes, como no Passo 4 da Tarefa 4).
+3. `CHANGELOG.md` `[Unreleased]`: entrada em `### Added` para a tela Linha do tempo (mesmo PR).
+4. PR no fork a partir de uma branch `alfama/feat-linha-do-tempo` para `alfama/main`
+   (`gh pr create -R maxeinstein-dev/ai-memory --base alfama/main`), corpo pelo
+   `.github/pull_request_template.md` + checklist de segurança da spec §2.1. Conferir autoria antes do
+   push (§2.2 da spec). CI `ci` verde.
+
+---
+
+### Tarefa 8: Tela de Propostas
 
 **Arquivos:** `src/routes/painel_propostas.rs`, `templates/painel_propostas.html`, `templates.rs`,
 `routes/mod.rs` (rota `/w/{workspace}/{project}/propostas`), teste em `routes.rs`; `painel.rs` só se a
@@ -661,9 +709,28 @@ botões.
 
 **Passo 3/4:** verde; commit `feat(web): tela de Propostas -- pendentes com antes/depois e o comando pronto`.
 
+**Passo 5: Teste adversarial** — listagem e detalhe são pontos de entrada por `(workspace, project, id)`
+com um id cru de proposta na URL/rota. Acrescentar: (a) uma proposta pendente do projeto B não aparece na
+listagem `?status=pending` do projeto A (controle: aparece na listagem do projeto B); (b) o **detalhe**
+dessa proposta, acessado pelo id dela a partir da rota do projeto A, responde 404 — não vaza corpo nem
+metadado de uma proposta alheia mesmo com o id certo. Rodar uma vez sem o filtro de `project_id` na
+consulta de `list_auto_improve_proposals`/`auto_improve_proposal_detail` para confirmar que o teste morde,
+depois restaurar o filtro. Atualizar a linha `alfama-3` de `docs/security-boundaries.md` (FUTURE → STRONG)
+no mesmo commit/PR.
+
 ---
 
-### Tarefa 8: `occurred_at` do backfill até o banco
+### Tarefa 9: Gate, imagem e PR — `alfama/feat-propostas`
+
+1. Tailwind (se preciso), gate completo.
+2. Imagem `ai-memory-alfama:2.4.0-alfama.3`; troca no compose (backup antes).
+3. `CHANGELOG.md` `[Unreleased]`: entrada em `### Added` para a tela Propostas (mesmo PR).
+4. PR no fork a partir de `alfama/feat-propostas` para `alfama/main`, corpo pelo template + checklist de
+   segurança, autoria conferida antes do push. CI verde.
+
+---
+
+### Tarefa 10: `occurred_at` do backfill até o banco
 
 **Arquivos:**
 - `crates/ai-memory-core/src/observation.rs` (`NewSession` l.140, `NewObservation` l.85)
@@ -702,7 +769,7 @@ botões.
 
 ---
 
-### Tarefa 9: `repair-backfill-timestamps`
+### Tarefa 11: `repair-backfill-timestamps`
 
 **Arquivos:**
 - `crates/ai-memory-cli/src/cli.rs` (subcomando + args), `src/commands/mod.rs`,
@@ -731,23 +798,34 @@ sessão. `--help` diz: rode `ai-memory backup` antes, com o servidor parado.
 
 **Passo 3:** verde; commit `feat(cli): repair-backfill-timestamps corrige inicio/fim de sessoes importadas`.
 
+**Passo 4: Teste adversarial** — `repair-backfill-timestamps` é uma operação destrutiva sobre `sessions`
+filtrada por `--project`; acrescentar um caso em que o banco tem sessões de **dois** projetos com o mesmo
+padrão de transcrição casável, e o comando com `--project P` só reescreve as de `P` (controle: as do outro
+projeto mantêm `started_at`/`ended_at` originais). Rodar uma vez sem o filtro de projeto em
+`planejar_reparo`/na consulta que lista `sessoes_no_banco` para confirmar que o teste morde (o outro
+projeto também seria reescrito), depois restaurar o filtro. Não há linha nova em
+`docs/security-boundaries.md` para isto — é um guard de escopo dentro de uma operação já coberta pelo
+requisito de "checagem de processo vivo" (tabela original, linha 10); citar o teste no PR.
+
 ---
 
-### Tarefa 10: Gate, imagem, reparo real e PR 2
+### Tarefa 12: Gate, imagem, reparo real e PR — `alfama/fix-backfill-timestamps`
 
 1. Tailwind (se preciso), gate completo.
-2. Imagem `ai-memory-alfama:2.4.0-alfama.2`; troca no compose (backup antes).
+2. Imagem `ai-memory-alfama:2.4.0-alfama.4`; troca no compose (backup antes).
 3. **Reparo real** (com OK do usuário): `docker compose stop`; rodar o comando num container com o volume
    montado e as transcrições **somente leitura** (`-v "$HOME/.claude/projects:/transcricoes:ro"`), primeiro
    sem `--apply` (colar o relatório), depois com; `docker compose up -d`.
 4. Verificação 4 da spec: a linha do tempo do SGW espalhada pelos dias reais.
-5. PR 2 no fork, CI verde.
+5. `CHANGELOG.md` `[Unreleased]`: entrada em `### Fixed` para a correção das datas do backfill (mesmo PR).
+6. PR no fork a partir de `alfama/fix-backfill-timestamps` para `alfama/main`, corpo pelo template +
+   checklist de segurança, autoria conferida antes do push. CI verde.
 
 ---
 
-## Fase 3 — Entre projetos (PR 3)
+## Fase 3 — Entre projetos (PR `alfama/feat-entre-projetos`)
 
-### Tarefa 11: Agrupamento de regras
+### Tarefa 13: Agrupamento de regras
 
 **Arquivos:** `painel.rs` (+ `RegraCandidata`, `GrupoDeRegras`), teste em `tests/suite/painel.rs`.
 
@@ -787,9 +865,17 @@ ignorado, fica `None`); vetor lido com `f32::from_le_bytes` em blocos de 4 (form
 
 **Passo 3:** verde; commit `feat(store): regras candidatas a globais por similaridade local`.
 
+**Passo 4: Teste adversarial** — `regras_de_todos_os_projetos` lê **entre** projetos por desenho (é o ponto
+da tela); o que precisa de teste é que ela não devolve nada de um workspace diferente do escopo permitido
+quando chamada de um contexto autenticado por workspace (se o produto não distinguir workspace aqui,
+registrar isso como decisão explícita no PR, não como omissão). Acrescentar um caso com regras equivalentes
+em dois workspaces diferentes e afirmar que só as candidatas visíveis ao ator aparecem (controle: dentro do
+mesmo workspace, agrupam normalmente). Atualizar `docs/security-boundaries.md` (linha `alfama-4`, parte de
+regras) com o resultado.
+
 ---
 
-### Tarefa 12: Tela Entre projetos
+### Tarefa 14: Tela Entre projetos
 
 **Arquivos:** `src/routes/painel_entre.rs`, `templates/painel_entre.html`, `templates.rs`,
 `routes/mod.rs` (rota `/entre-projetos`), link no header de `base.html` (`<a href="entre-projetos">`),
@@ -811,12 +897,23 @@ globais, Handoffs abertos, Mensagens pendentes), com "nada aqui" quando vazio.
 
 **Passo 3/4:** verde; commit `feat(web): tela Entre projetos -- regras repetidas, handoffs e mensagens`.
 
+**Passo 5: Teste adversarial** — o teste (c) do Passo 1 já cobre handoff de outro dono não aparecendo
+(`OwnerFilter` reusado da API). Acrescentar o par que falta: **mensagens pendentes** de um par
+origem→destino que não inclui o ator autenticado não aparecem na lista dele (controle: uma mensagem cujo
+destino é o ator aparece); rodar uma vez chamando `list_messages` sem o filtro por caixa/ator para confirmar
+que o teste morde, depois restaurar. Atualizar a linha `alfama-4` de `docs/security-boundaries.md`
+(FUTURE → STRONG, citando os testes de handoff e de mensagem) no mesmo commit/PR.
+
 ---
 
-### Tarefa 13: Gate, imagem e PR 3
+### Tarefa 15: Gate, imagem e PR — `alfama/feat-entre-projetos`
 
-Tailwind (se preciso), gate, imagem `ai-memory-alfama:2.4.0-alfama.3`, troca no compose (backup antes),
-Verificação 6 da spec, PR 3 no fork com CI verde.
+1. Tailwind (se preciso), gate completo.
+2. Imagem `ai-memory-alfama:2.4.0-alfama.5`; troca no compose (backup antes).
+3. `CHANGELOG.md` `[Unreleased]`: entrada em `### Added` para a tela Entre projetos (mesmo PR).
+4. Verificação 6 da spec.
+5. PR no fork a partir de `alfama/feat-entre-projetos` para `alfama/main`, corpo pelo template + checklist
+   de segurança, autoria conferida antes do push. CI verde.
 
 ---
 

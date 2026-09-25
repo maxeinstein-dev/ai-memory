@@ -238,6 +238,68 @@ pub(crate) struct BriefingView {
     pub itens: Vec<ItemDoBriefing>,
 }
 
+// ---------------------------------------------------------------------------
+// painel_timeline.html
+// ---------------------------------------------------------------------------
+
+/// One current page a timeline session produced, ready for the template.
+pub(crate) struct ProducedPageRow {
+    /// Relative wiki path.
+    pub path: String,
+    /// Page title.
+    pub title: String,
+    /// Semantic kind badge text (`rule`, `decision`, `concept`, `gotcha`, …).
+    pub kind: String,
+    /// Link target for this page.
+    pub href: String,
+}
+
+/// One session on a project's timeline, grouped under its day.
+pub(crate) struct TimelineSessionRow {
+    /// Which agent CLI ran this session.
+    pub agent: String,
+    /// Duration label — `"Xh YYmin"`/`"Xmin"`/`"Xs"`, or `"em aberto"` while
+    /// the session has no `ended_us`.
+    pub duration_label: String,
+    /// Observation-count label — the count, or `"—"` for an open session.
+    pub observations_label: String,
+    /// Current pages this session produced or reaffirmed.
+    pub produced: Vec<ProducedPageRow>,
+}
+
+/// One UTC calendar day on the timeline: its sessions, and the bar width
+/// (as a percentage of the day with the most sessions in the window).
+pub(crate) struct TimelineDay {
+    /// `YYYY-MM-DD`, UTC.
+    pub date: String,
+    /// Number of sessions that started this day.
+    pub count: usize,
+    /// `count * 100 / max_sessions_in_period`, capped at 100 — drives the
+    /// inline `width` of the day's bar (no dynamic Tailwind class).
+    pub pct: usize,
+    /// This day's sessions, most recent first (inherited from the store's
+    /// ordering).
+    pub sessions: Vec<TimelineSessionRow>,
+}
+
+/// View-model for `GET /w/:workspace/:project/linha-do-tempo`.
+#[derive(Template)]
+#[template(path = "painel_timeline.html")]
+pub(crate) struct TimelineView {
+    /// Workspace name.
+    pub workspace: String,
+    /// Project name.
+    pub project: String,
+    /// Link target for this project, used by `_abas.html`.
+    pub base_href: String,
+    /// Active panel-tab for `_abas.html`.
+    pub aba: &'static str,
+    /// Effective `?dias=` window (7, 30, or 90 — never anything else).
+    pub dias: i64,
+    /// Days with at least one session in the window, most recent first.
+    pub days: Vec<TimelineDay>,
+}
+
 /// View-model for a namespace (directory) listing — `GET
 /// /w/:workspace/:project/p/:namespace/` when the path names a namespace
 /// rather than a page (#603).
