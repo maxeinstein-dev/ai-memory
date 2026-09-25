@@ -148,6 +148,12 @@ pub struct HookEnvelope {
     pub title_hint: Option<String>,
     /// Optional body excerpt extracted from the agent's raw payload.
     pub body_excerpt: Option<String>,
+    /// Original event time (RFC 3339), when the client supplied one —
+    /// notably backfill replaying a transcript's own per-event timestamps.
+    /// Bounded and converted at the point of use via
+    /// [`HookEnvelope::occurred_at_micros`]; never trust it unchecked.
+    #[serde(default)]
+    pub occurred_at: Option<String>,
     /// The agent's raw JSON, kept for forensics.
     pub raw: serde_json::Value,
 }
@@ -176,6 +182,7 @@ impl std::fmt::Debug for HookEnvelope {
             )
             .field("extension", &self.extension)
             .field("source_event", &self.source_event)
+            .field("occurred_at", &self.occurred_at)
             .field(
                 "title_hint",
                 &self.title_hint.as_ref().map(|_| "<redacted>"),
@@ -554,6 +561,14 @@ impl HookEnvelope {
             })
         };
         let ingest_key = query.ingest_key.filter(|k| valid_ingest_key(k));
+        // Original event time (RFC 3339), when the client carried one — currently
+        // only `ai-memory backfill`, replaying a transcript's own per-event
+        // timestamps. This is numeric metadata, not text, so it never goes
+        // through the sanitizer (invariant #6 is about untrusted TEXT reaching
+        // storage/prompts unscrubbed; a timestamp has no such surface). It is
+        // still client-controlled input over the hook endpoint, so it is bounded
+        // at parse time in `occurred_at_micros`, not trusted here.
+        let occurred_at = extract_string(&raw, &["occurred_at"]);
         Self {
             event,
             agent,
@@ -573,10 +588,42 @@ impl HookEnvelope {
             source_event,
             title_hint,
             body_excerpt,
+            occurred_at,
             raw,
         }
     }
+
+    /// Parse and bound [`Self::occurred_at`] into a microsecond timestamp
+    /// suitable for `NewSession`/`NewObservation::occurred_at`.
+    ///
+    /// `occurred_at` arrives from a client over the hook endpoint, so it is
+    /// bounded here rather than trusted outright: only strictly positive
+    /// values that are no more than [`MAX_OCCURRED_AT_FUTURE_SKEW_MICROS`]
+    /// ahead of server time are honored. Anything else — an unparseable
+    /// string, a non-positive value, or a suspicious far-future timestamp —
+    /// resolves to `None`, which callers fall back to "now" for. Hooks are
+    /// fire-and-forget, so this never errors.
+    #[must_use]
+    pub fn occurred_at_micros(&self) -> Option<i64> {
+        let parsed = self
+            .occurred_at
+            .as_deref()?
+            .parse::<jiff::Timestamp>()
+            .ok()?
+            .as_microsecond();
+        let now = jiff::Timestamp::now().as_microsecond();
+        if parsed > 0 && parsed <= now.saturating_add(MAX_OCCURRED_AT_FUTURE_SKEW_MICROS) {
+            Some(parsed)
+        } else {
+            None
+        }
+    }
 }
+
+/// How far ahead of server time a client-supplied `occurred_at` may sit
+/// before it is treated as bogus (clock skew, or a hostile client) and
+/// dropped to `None` instead of being trusted.
+const MAX_OCCURRED_AT_FUTURE_SKEW_MICROS: i64 = 5 * 60 * 1_000_000;
 
 /// An ingest key is client-controlled input: accept only short, plain tokens
 /// (1–64 ASCII alphanumerics, `-` or `_` — a UUID simple/hyphenated form
@@ -1165,6 +1212,91 @@ mod tests {
         );
         assert_eq!(env.project_override.as_deref(), Some("repo-a"));
         assert_eq!(env.project_source, ProjectSource::RepoRoot);
+    }
+
+    /// `occurred_at` is client-controlled input arriving over the hook
+    /// endpoint, so it must be bounded, not trusted outright. A valid past
+    /// timestamp is stored exactly; garbage, non-positive, and far-future
+    /// values must all fall back to `None` ("now" at the store boundary) —
+    /// never an error, since hooks are fire-and-forget.
+    #[test]
+    fn occurred_at_micros_accepts_a_valid_past_timestamp() {
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "user-prompt-submit".into(),
+                ..Default::default()
+            },
+            serde_json::json!({ "session_id": "s", "occurred_at": "2026-09-10T12:00:00Z" }),
+        );
+        let expected = "2026-09-10T12:00:00Z"
+            .parse::<jiff::Timestamp>()
+            .unwrap()
+            .as_microsecond();
+        assert_eq!(env.occurred_at_micros(), Some(expected));
+    }
+
+    #[test]
+    fn occurred_at_micros_rejects_a_far_future_timestamp() {
+        // Adversarial: a client claiming its event happened next year must not
+        // be trusted — the bound must actually reject it, not just decorate
+        // the code with an unused check (verified by hand: with the `<=`
+        // bound temporarily removed this case failed, as expected).
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "user-prompt-submit".into(),
+                ..Default::default()
+            },
+            serde_json::json!({ "session_id": "s", "occurred_at": "2099-01-01T00:00:00Z" }),
+        );
+        assert_eq!(
+            env.occurred_at_micros(),
+            None,
+            "a far-future timestamp must not be trusted"
+        );
+    }
+
+    #[test]
+    fn occurred_at_micros_rejects_non_positive_values() {
+        for bogus in ["1970-01-01T00:00:00Z", "0000-01-01T00:00:00Z"] {
+            let env = HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: "user-prompt-submit".into(),
+                    ..Default::default()
+                },
+                serde_json::json!({ "session_id": "s", "occurred_at": bogus }),
+            );
+            // The epoch and earlier parse fine as an RFC 3339 timestamp but
+            // must still be rejected: a non-positive microsecond value is
+            // never a plausible original event time.
+            let micros = bogus.parse::<jiff::Timestamp>().unwrap().as_microsecond();
+            assert!(micros <= 0, "fixture must actually be non-positive");
+            assert_eq!(env.occurred_at_micros(), None);
+        }
+    }
+
+    #[test]
+    fn occurred_at_micros_rejects_garbage_strings() {
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "user-prompt-submit".into(),
+                ..Default::default()
+            },
+            serde_json::json!({ "session_id": "s", "occurred_at": "not-a-timestamp" }),
+        );
+        assert_eq!(env.occurred_at_micros(), None);
+    }
+
+    #[test]
+    fn occurred_at_missing_from_the_body_parses_as_none() {
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "user-prompt-submit".into(),
+                ..Default::default()
+            },
+            serde_json::json!({ "session_id": "s" }),
+        );
+        assert_eq!(env.occurred_at, None);
+        assert_eq!(env.occurred_at_micros(), None);
     }
 
     #[test]

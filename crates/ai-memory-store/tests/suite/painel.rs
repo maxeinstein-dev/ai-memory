@@ -52,6 +52,7 @@ async fn begun_session(store: &Store, ws: WorkspaceId, proj: ProjectId) -> Sessi
     store
         .writer
         .begin_session(NewSession {
+            occurred_at: None,
             id: session_id,
             workspace_id: ws,
             project_id: proj,
