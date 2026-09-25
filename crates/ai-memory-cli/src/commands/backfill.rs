@@ -354,6 +354,9 @@ async fn import_one(
 
     let sid = &session.native_session_id;
     let agent = session.harness.agent_kind().as_str();
+    let occurred_ats = resolve_occurred_at(&transcript.events);
+    // The session starts at its first timestamped event, not at import time.
+    let first_occurred_at = occurred_ats.iter().flatten().next().cloned();
     let mut items = Vec::with_capacity(transcript.events.len() + 2);
     items.push(hook_item(
         endpoint,
@@ -364,10 +367,9 @@ async fn import_one(
         sid,
         &format!("{sid}:session-start"),
         None,
-        serde_json::json!({ "session_id": sid }),
+        serde_json::json!({ "session_id": sid, "occurred_at": first_occurred_at }),
     )?);
     let mut content = 0usize;
-    let occurred_ats = resolve_occurred_at(&transcript.events);
     for (event, occurred_at) in transcript.events.iter().zip(&occurred_ats) {
         if let Some(mapped) = map_event(sid, event, occurred_at.as_deref()) {
             items.push(hook_item(
