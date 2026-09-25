@@ -3668,3 +3668,508 @@ async fn linha_do_tempo_escapa_titulo_malicioso_de_pagina_produzida() {
         "o titulo malicioso tem de aparecer escapado pelo askama: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// propostas
+// ---------------------------------------------------------------------------
+
+fn new_proposal(
+    path: &str,
+    title: &str,
+    confidence: f64,
+    body: &str,
+) -> ai_memory_store::NewAutoImproveProposal {
+    ai_memory_store::NewAutoImproveProposal {
+        operation: ai_memory_store::AutoImproveProposalOperation::Create,
+        target_path: PagePath::new(path).unwrap(),
+        kind: "learning".into(),
+        title: title.into(),
+        confidence,
+        rationale: "porque sim".into(),
+        evidence_json: serde_json::json!([]),
+        body_markdown: body.into(),
+        artifact_sha256: None,
+        edit_mode: None,
+        patch_json: None,
+        expected_base_body_sha256: None,
+    }
+}
+
+fn update_proposal(
+    path: &str,
+    title: &str,
+    confidence: f64,
+    body: &str,
+) -> ai_memory_store::NewAutoImproveProposal {
+    ai_memory_store::NewAutoImproveProposal {
+        operation: ai_memory_store::AutoImproveProposalOperation::Update,
+        ..new_proposal(path, title, confidence, body)
+    }
+}
+
+/// Stage one run with `proposals` and return the staged proposal ids, in
+/// input order — mirrors `ai-memory-store`'s own staging tests
+/// (`tests/suite/auto_improve_staging.rs`).
+async fn stage(
+    store: &Store,
+    ws: ai_memory_core::WorkspaceId,
+    proj: ai_memory_core::ProjectId,
+    proposals: Vec<ai_memory_store::NewAutoImproveProposal>,
+) -> Vec<ai_memory_core::AutoImproveProposalId> {
+    store
+        .writer
+        .stage_auto_improve_run(ai_memory_store::StageAutoImproveRun {
+            workspace_id: ws,
+            project_id: proj,
+            session_id: None,
+            proposals,
+            proposal_actor: ai_memory_core::ActorContext::anonymous(),
+            warnings_json: serde_json::json!([]),
+            rejected_candidates_json: serde_json::json!([]),
+            config_json: serde_json::json!({}),
+            summary: Some("s".into()),
+            provider: None,
+            model: None,
+        })
+        .await
+        .unwrap()
+        .proposal_ids
+}
+
+/// (a) 200 with the title, `target_path`, confidence, and the exact
+/// `ai-memory pending-writes approve <ID>`/`reject <ID>` commands as
+/// selectable text.
+#[tokio::test]
+async fn propostas_mostra_titulo_alvo_confianca_e_comandos_prontos() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    let ids = stage(
+        &store,
+        ws,
+        proj,
+        vec![new_proposal(
+            "concepts/nova.md",
+            "Registrar novo conceito",
+            0.87,
+            "# Nova\n\ncorpo proposto",
+        )],
+    )
+    .await;
+    let id = ids[0];
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/propostas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("Registrar novo conceito"),
+        "falta o titulo: {text}"
+    );
+    assert!(
+        text.contains("concepts/nova.md"),
+        "falta o target_path: {text}"
+    );
+    assert!(text.contains("87%"), "falta a confianca: {text}");
+    assert!(
+        text.contains(&format!("ai-memory pending-writes approve {id}")),
+        "falta o comando de approve exato: {text}"
+    );
+    assert!(
+        text.contains(&format!("ai-memory pending-writes reject {id}")),
+        "falta o comando de reject exato: {text}"
+    );
+}
+
+/// (b) `?status=approved` hides a pending proposal; an unrecognised status
+/// value falls back to `pending`.
+#[tokio::test]
+async fn propostas_filtra_por_status_e_invalido_cai_em_pending() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    let ids = stage(
+        &store,
+        ws,
+        proj,
+        vec![new_proposal(
+            "concepts/pendente.md",
+            "Ainda pendente",
+            0.5,
+            "corpo",
+        )],
+    )
+    .await;
+    store
+        .writer
+        .reject_auto_improve_proposal(ai_memory_store::RejectAutoImproveProposal {
+            workspace_id: ws,
+            project_id: proj,
+            proposal_id: ids[0],
+            reason: "nao serve".into(),
+            actor: ai_memory_core::ActorContext::anonymous(),
+            author_id: None,
+        })
+        .await
+        .unwrap();
+
+    // The only proposal is now `rejected`; `?status=approved` must not show it.
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/propostas?status=approved")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !text.contains("Ainda pendente"),
+        "proposta rejeitada nao pode aparecer em ?status=approved: {text}"
+    );
+
+    // `?status=nao-existe` is not a real status; must fall back to `pending`,
+    // which also does not contain the now-rejected proposal.
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/propostas?status=nao-existe")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("pending"),
+        "status invalido deve cair no padrao pending, mostrado na tela: {text}"
+    );
+    assert!(
+        !text.contains("Ainda pendente"),
+        "a proposta rejeitada nao esta pending, nao pode aparecer: {text}"
+    );
+}
+
+/// (c) An `update` proposal whose target page changed after staging shows
+/// "conflito" — the same detection `approve_proposal` uses
+/// (`sha256(current body) != target_body_sha256_at_stage`), computed here
+/// purely for display, never applied.
+#[tokio::test]
+async fn propostas_de_update_com_pagina_alvo_mudada_mostra_conflito() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    store
+        .writer
+        .upsert_page(new_page(
+            ws,
+            proj,
+            "notes/alvo.md",
+            "Alvo",
+            "corpo original",
+        ))
+        .await
+        .unwrap();
+    stage(
+        &store,
+        ws,
+        proj,
+        vec![update_proposal(
+            "notes/alvo.md",
+            "Atualizar alvo",
+            0.7,
+            "corpo proposto",
+        )],
+    )
+    .await;
+    // The target page changes AFTER staging — the proposal's
+    // `target_body_sha256_at_stage` now disagrees with the live body.
+    wait_for_next_microsecond();
+    store
+        .writer
+        .upsert_page(new_page(
+            ws,
+            proj,
+            "notes/alvo.md",
+            "Alvo",
+            "corpo mudou depois do estagio",
+        ))
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/propostas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.to_lowercase().contains("conflito"),
+        "pagina alvo mudou depois do estagio, tem de mostrar conflito: {text}"
+    );
+}
+
+/// (d) An unknown project answers the HTML 404 page; a project that exists
+/// but under a DIFFERENT workspace than named in the URL also 404s (control:
+/// the same project under its real workspace answers 200) — same protocol
+/// as the timeline screen's adversarial test.
+#[tokio::test]
+async fn propostas_de_projeto_inexistente_ou_de_outro_workspace_responde_404() {
+    let (_tmp, store, wiki) = setup().await;
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/nao-existe/propostas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+    let ws_a = store
+        .writer
+        .get_or_create_workspace("workspace-a")
+        .await
+        .unwrap();
+    let _ws_b = store
+        .writer
+        .get_or_create_workspace("workspace-b")
+        .await
+        .unwrap();
+    let _ = store
+        .writer
+        .get_or_create_project(ws_a, "scratch", None)
+        .await
+        .unwrap();
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let cruzado = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/workspace-b/scratch/propostas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        cruzado.status(),
+        StatusCode::NOT_FOUND,
+        "projeto de outro workspace nao pode responder 200"
+    );
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let legitimo = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/workspace-a/scratch/propostas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legitimo.status(), StatusCode::OK);
+}
+
+/// (e) ADVERSARIAL: a pending proposal staged for project B must not appear
+/// in project A's `?status=pending` listing, and A's route may not surface
+/// B's proposal detail even by its real id (control: it does appear in B's
+/// own listing). Bitten and confirmed by hand: temporarily dropping the
+/// `project_id` filter from `list_auto_improve_proposals`/
+/// `auto_improve_proposal_detail` in
+/// `crates/ai-memory-store/src/reader.rs` made this test fail (project A's
+/// listing/detail leaked project B's proposal); reverted immediately after
+/// confirming (`ai-memory-store/src/reader.rs` untouched here).
+#[tokio::test]
+async fn propostas_de_outro_projeto_nao_vazam_na_listagem_nem_no_detalhe() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj_a = store
+        .writer
+        .get_or_create_project(ws, "projeto-a", None)
+        .await
+        .unwrap();
+    let proj_b = store
+        .writer
+        .get_or_create_project(ws, "projeto-b", None)
+        .await
+        .unwrap();
+    let ids_b = stage(
+        &store,
+        ws,
+        proj_b,
+        vec![new_proposal(
+            "segredos/b.md",
+            "Segredo do projeto B",
+            0.9,
+            "corpo confidencial de B",
+        )],
+    )
+    .await;
+    let id_b = ids_b[0];
+
+    // Control: project B's own listing shows its proposal.
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/projeto-b/propostas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        text.contains("Segredo do projeto B"),
+        "controle: a listagem do proprio projeto B deve mostrar a proposta: {text}"
+    );
+
+    // Project A's listing must NOT show project B's pending proposal.
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/projeto-a/propostas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !text.contains("Segredo do projeto B"),
+        "a listagem do projeto A nao pode vazar a proposta do projeto B: {text}"
+    );
+    assert!(
+        !text.contains("corpo confidencial de B"),
+        "nem o corpo da proposta do projeto B: {text}"
+    );
+
+    // There is no per-id detail route in this screen (spec §3.3 lists only
+    // the collection endpoint); assert the boundary at the store level with
+    // B's real id under A's scope, which is exactly what a detail route
+    // would have to check before rendering anything.
+    let leaked = store
+        .reader
+        .auto_improve_proposal_detail(ws, proj_a, id_b)
+        .await
+        .unwrap();
+    assert!(
+        leaked.is_none(),
+        "o id real da proposta de B nao pode resolver sob o escopo do projeto A"
+    );
+}
+
+/// (f) A proposal's title and rationale are untrusted (reviewer/LLM output)
+/// and must render HTML-escaped, never as `|safe` markup.
+#[tokio::test]
+async fn propostas_escapa_titulo_e_justificativa_maliciosos() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "scratch", None)
+        .await
+        .unwrap();
+    let mut malicious = new_proposal("concepts/xss.md", "<script>alert(1)</script>", 0.5, "corpo");
+    malicious.rationale = "<script>alert(2)</script>".into();
+    stage(&store, ws, proj, vec![malicious]).await;
+
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/scratch/propostas")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = std::str::from_utf8(&body).unwrap();
+    assert!(
+        !text.contains("<script>alert(1)</script>") && !text.contains("<script>alert(2)</script>"),
+        "titulo/justificativa maliciosos nao podem aparecer sem escape: {text}"
+    );
+    assert!(
+        text.matches("&lt;script&gt;").count() >= 2,
+        "titulo e justificativa tem de aparecer escapados pelo askama: {text}"
+    );
+}
