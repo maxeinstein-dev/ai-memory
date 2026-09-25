@@ -133,6 +133,9 @@ pub async fn run() -> Result<()> {
         Command::ExportOkf(args) => commands::export_okf::run(&config, args).await,
         Command::Restore(args) => commands::restore::run(&config, args),
         Command::Reindex(args) => commands::reindex::run(&config, args).await,
+        Command::RepairBackfillTimestamps(args) => {
+            commands::repair_backfill_timestamps::run(&config, args).await
+        }
         Command::InstallHooks(args) => commands::install_hooks::run(&config, args),
         // `Hook` is handled in the fast-path above (before config/tracing).
         Command::Hook(args) => commands::hook::run(Some(config.data_dir.clone()), args).await,

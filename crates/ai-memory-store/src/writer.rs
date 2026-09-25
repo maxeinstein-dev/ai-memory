@@ -142,6 +142,14 @@ pub(crate) enum WriteCmd {
         handoff: NewHandoff,
         reply: oneshot::Sender<StoreResult<HandoffId>>,
     },
+    SetSessionTimes {
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        session_id: SessionId,
+        started_us: i64,
+        ended_us: Option<i64>,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     EndLifecycleOnlySession {
         session_id: SessionId,
         reply: oneshot::Sender<StoreResult<LifecycleOnlyEndOutcome>>,
@@ -916,6 +924,35 @@ impl WriterHandle {
         self.send(WriteCmd::EndSession {
             session_id,
             summary_page_id,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Overwrite one session's `started_at`/`ended_at`, scoped by
+    /// `(workspace_id, project_id)`. Used only by the offline
+    /// `ai-memory repair-backfill-timestamps` command (fork-only) to correct
+    /// sessions `backfill` imported before it carried `occurred_at`; see
+    /// [`crate::ops::set_session_times`].
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn set_session_times(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        session_id: SessionId,
+        started_us: i64,
+        ended_us: Option<i64>,
+    ) -> StoreResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::SetSessionTimes {
+            workspace_id,
+            project_id,
+            session_id,
+            started_us,
+            ended_us,
             reply: tx,
         })
         .await?;
@@ -2832,6 +2869,24 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             } => {
                 let result = ops::end_session(&mut conn, &session_id, summary_page_id.as_ref());
                 send_or_warn(reply, result, "end_session");
+            }
+            WriteCmd::SetSessionTimes {
+                workspace_id,
+                project_id,
+                session_id,
+                started_us,
+                ended_us,
+                reply,
+            } => {
+                let result = ops::set_session_times(
+                    &conn,
+                    workspace_id,
+                    project_id,
+                    &session_id,
+                    started_us,
+                    ended_us,
+                );
+                send_or_warn(reply, result, "set_session_times");
             }
             WriteCmd::EndSessionWithHandoff {
                 session_id,

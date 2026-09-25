@@ -1597,6 +1597,40 @@ fn end_session_row(
     Ok(())
 }
 
+/// Overwrite a session's `started_at`/`ended_at` with times recovered from its
+/// original transcript, for `ai-memory repair-backfill-timestamps` (fork-only
+/// offline repair of sessions imported by `backfill` before it carried
+/// `occurred_at`). Scoped by `(workspace_id, project_id)` in the `WHERE`
+/// clause, like every other panel/report query and every other write in this
+/// module — a session id that belongs to a different project than the one the
+/// operator passed `--project` for is left untouched.
+///
+/// `ended_us: None` leaves the column as-is (never clears an existing end, and
+/// never fabricates one for a session the caller has decided to treat as
+/// still open); the plan that produces this call already encodes "leave NULL
+/// alone" and "keep the current value" as `None`.
+pub fn set_session_times(
+    conn: &Connection,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+    session_id: &SessionId,
+    started_us: i64,
+    ended_us: Option<i64>,
+) -> StoreResult<()> {
+    conn.execute(
+        "UPDATE sessions SET started_at = ?1, ended_at = COALESCE(?2, ended_at) \
+         WHERE id = ?3 AND workspace_id = ?4 AND project_id = ?5",
+        params![
+            started_us,
+            ended_us,
+            session_id.as_bytes(),
+            workspace_id.as_bytes(),
+            project_id.as_bytes(),
+        ],
+    )?;
+    Ok(())
+}
+
 /// Append a single observation. Caller is expected to have already
 /// inserted the parent session via [`begin_session`].
 pub fn insert_observation(
@@ -8601,6 +8635,123 @@ pub(crate) mod tests {
             )
             .unwrap();
         assert_eq!(created_at, original);
+    }
+
+    /// `set_session_times` overwrites both columns for a session that
+    /// belongs to the caller's `(workspace_id, project_id)`.
+    #[test]
+    fn set_session_times_overwrites_started_and_ended() {
+        let (_tmp, mut conn, ws, proj) = fresh_db();
+        let sid = SessionId::new();
+        begin_session(
+            &mut conn,
+            &NewSession {
+                occurred_at: None,
+                id: sid,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            },
+        )
+        .unwrap();
+        end_session(&mut conn, &sid, None).unwrap();
+
+        let new_started: i64 = 1_757_505_600_000_000; // 2025-09-10T12:00:00Z
+        let new_ended: i64 = 1_757_505_900_000_000; // 2025-09-10T12:05:00Z
+        set_session_times(&conn, ws, proj, &sid, new_started, Some(new_ended)).unwrap();
+
+        let (started_at, ended_at): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT started_at, ended_at FROM sessions WHERE id = ?1",
+                params![&sid.as_bytes()[..]],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(started_at, new_started);
+        assert_eq!(ended_at, Some(new_ended));
+    }
+
+    /// `ended_us: None` leaves the existing column alone — it neither clears
+    /// a real end time nor fabricates one for a session the repair plan
+    /// decided to leave open.
+    #[test]
+    fn set_session_times_with_none_ended_leaves_ended_at_untouched() {
+        let (_tmp, mut conn, ws, proj) = fresh_db();
+        let sid = SessionId::new();
+        begin_session(
+            &mut conn,
+            &NewSession {
+                occurred_at: None,
+                id: sid,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            },
+        )
+        .unwrap();
+        // Still open: ended_at is NULL.
+        set_session_times(&conn, ws, proj, &sid, 1_757_505_600_000_000, None).unwrap();
+        let ended_at: Option<i64> = conn
+            .query_row(
+                "SELECT ended_at FROM sessions WHERE id = ?1",
+                params![&sid.as_bytes()[..]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(ended_at.is_none(), "an open session must stay open");
+    }
+
+    /// Adversarial: a session id that matches by BLOB but belongs to a
+    /// different project than the one the caller passed must not be
+    /// modified. `--project` is the only scope guard `repair-backfill-timestamps`
+    /// has; without it, one project's `--apply` could silently rewrite
+    /// another project's history.
+    #[test]
+    fn set_session_times_does_not_touch_a_session_of_a_different_project() {
+        let (_tmp, mut conn, ws, proj_a) = fresh_db();
+        let proj_b = get_or_create_project(&mut conn, &ws, "other", None).unwrap();
+        let sid = SessionId::new();
+        let original: i64 = 1_700_000_000_000_000;
+        begin_session(
+            &mut conn,
+            &NewSession {
+                occurred_at: Some(original),
+                id: sid,
+                workspace_id: ws,
+                project_id: proj_b,
+                agent_kind: AgentKind::ClaudeCode,
+                cwd: None,
+                actor_user: None,
+            },
+        )
+        .unwrap();
+
+        // Attempt to rewrite it while scoped to proj_a: must be a no-op.
+        set_session_times(
+            &conn,
+            ws,
+            proj_a,
+            &sid,
+            1_757_505_600_000_000,
+            Some(1_757_505_900_000_000),
+        )
+        .unwrap();
+
+        let started_at: i64 = conn
+            .query_row(
+                "SELECT started_at FROM sessions WHERE id = ?1",
+                params![&sid.as_bytes()[..]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            started_at, original,
+            "a session scoped to project B must not be rewritten by a call scoped to project A"
+        );
     }
 
     /// Without `occurred_at`, `insert_observation` keeps stamping "now".

@@ -49,6 +49,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   PR whose `ci.yml` drops `alfama/main` from `on.push.branches` (the line a
   rebase onto upstream would lose), via `scripts/alfama/check-fork-ci.sh`. (#2)
 
+### Fixed
+- (fork alfama) `backfill` now stores each imported session's and
+  observation's own original event time (`sessions.started_at`/`ended_at`,
+  `observations.created_at`) instead of the time of the import itself, via a
+  new optional `occurred_at` carried from the transcript through `/hook`'s
+  `HookEnvelope` to `NewSession`/`NewObservation`. An event missing its own
+  timestamp inherits the nearest preceding one. Metadata only — `occurred_at`
+  never passes through the sanitizer, since it never becomes stored text.
+- (fork alfama) New `ai-memory repair-backfill-timestamps [--project P]
+  [--transcripts-dir DIR] [--apply]` corrects `sessions.started_at`/`ended_at`
+  for sessions already imported by an older `backfill` that discarded the
+  transcript's own timestamps. Re-reads the local transcripts read-only and
+  matches sessions purely by id (native id, or its UUID v5 when the native id
+  is not itself a UUID); dry-run by default (reports sessions matched/
+  unmatched and the date range before/after); `--apply` refuses while a
+  sibling `ai-memory` process is alive and writes through the `WriterHandle`,
+  one transaction per session, scoped to `--project`. Never touches
+  `observations` or pages, never sets an end time on a still-open session,
+  and never moves a time into the future. (#5)
+
 ## [2.4.0] - 2026-09-21
 
 ### Security
