@@ -109,6 +109,7 @@ pub struct NewObservation {
     /// Original event time in microseconds, when known (e.g. backfill
     /// replaying a transcript's own timestamps). `None` means "now" — the
     /// store fills it in at write time.
+    #[serde(default)]
     pub occurred_at: Option<i64>,
 }
 

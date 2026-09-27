@@ -17,6 +17,7 @@ use ai_memory_wiki::{AdmissionContext, AdmissionOp, Wiki, WritePageRequest};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use crate::path_sanitize::slugify_page_path;
 use crate::projection::{ObservationProjectionConfig, project_observations};
 use crate::types::{
     ConsolidatedBatch, ConsolidatedPage, ConsolidationOutcome, Relations, SlotKind,
@@ -621,6 +622,19 @@ impl Consolidator {
                 );
                 continue;
             }
+            // Final guard for whatever `slugify_page_path` in `build_update`
+            // can't fix (dot-segments, reserved DOS device names, `.git`,
+            // ...), mirroring bootstrap's #847 fix: skip this one page
+            // rather than let `Wiki::apply_batch`'s atomic `ensure_portable`
+            // check abort every other page in the batch (#848).
+            if let Err(e) = req.path.ensure_portable() {
+                warn!(
+                    path = %req.path.as_str(),
+                    error = %e,
+                    "skipped consolidation page update: path is not portable",
+                );
+                continue;
+            }
             requests.push(req);
             outcomes_preview.push(outcome);
         }
@@ -689,7 +703,17 @@ fn build_update(
         let slug = slugify_for_rule(&effective_title);
         format!("_rules/{slug}.md")
     } else {
-        upd.path.clone()
+        // The LLM sometimes echoes free text straight into a page path (a
+        // conventional-commit subject like `build(sandbox): orchestrate`).
+        // That passes `PagePath::new` (deliberately tolerant) but fails
+        // `ensure_portable`, which `Wiki::apply_batch` enforces atomically —
+        // one bad path there would abort every page in this batch, not just
+        // its own (#848, same class as bootstrap's #847). Sanitize before
+        // `PagePath::new` so every downstream use of `path` (rule routing
+        // already produces a safe slug above, slot placement, and the
+        // `req.path == anchor` comparison in `consolidate_session_multi`)
+        // sees this one, consistent, sanitized value.
+        slugify_page_path(&upd.path)
     };
     let path = PagePath::new(final_path)?;
     let tier = upd.tier;
@@ -1431,14 +1455,33 @@ fn indent_for_prompt(s: &str) -> String {
 
 /// ASCII-slug a rule title for the `_rules/<slug>.md` path.
 ///
-/// Lower-cases, replaces runs of non-`[a-z0-9]` with `-`, trims
-/// leading/trailing hyphens, and caps at 60 chars. Falls back to
-/// `rule` when the input has no alphanumerics (e.g. a non-Latin
-/// title) so we always produce a valid PagePath.
+/// Folds Latin diacritics to ASCII (NFD-decompose, drop the combining
+/// marks), lower-cases, replaces runs of non-`[a-z0-9]` with `-`, trims
+/// leading/trailing hyphens, and caps at 60 chars at a word boundary.
+/// Falls back to `rule` when the input has no folding-surviving
+/// alphanumerics (e.g. a CJK-only title) so we always produce a valid
+/// PagePath.
+///
+/// Diacritic folding (#886) is why `estável`/`retenção` slug as
+/// `estavel`/`retencao` instead of `est-vel`/`reten-o`: without the fold
+/// each accented letter is a non-ASCII scalar that the run-collapse turns
+/// into a `-`, splitting the word. The truncation cuts at the last hyphen
+/// within the 60-char budget so a long title ends on a whole word rather
+/// than mid-word. Non-decomposable Latin-1 letters (ß, ø, æ) still fall to
+/// `-`, which is acceptable; all pt-BR letters decompose to ASCII.
 fn slugify_for_rule(title: &str) -> String {
-    let mut out = String::with_capacity(title.len());
+    // NFD decomposition splits `é` into `e` + U+0301 (combining acute),
+    // `ç` into `c` + U+0327, etc. Reuses ai-memory-core's icu_normalizer.
+    let decomposed = icu_normalizer::DecomposingNormalizer::new_nfd().normalize(title);
+    let mut out = String::with_capacity(decomposed.len());
     let mut prev_dash = true; // leading dashes get folded
-    for c in title.chars() {
+    for c in decomposed.chars() {
+        // Drop the combining marks NFD left behind (the Combining
+        // Diacritical Marks block), rather than folding them to a `-`,
+        // so the base letter stands alone: `e` + U+0301 -> `e`.
+        if ('\u{0300}'..='\u{036F}').contains(&c) {
+            continue;
+        }
         let lower = c.to_ascii_lowercase();
         if lower.is_ascii_alphanumeric() {
             out.push(lower);
@@ -1455,7 +1498,17 @@ fn slugify_for_rule(title: &str) -> String {
         return "rule".into();
     }
     if out.len() > 60 {
-        out.truncate(60);
+        // `out` is ASCII here, so byte index 60 is a char boundary. Cut at
+        // the last hyphen inside the window to end on a whole word; only
+        // hard-cut at 60 when the window holds no hyphen (one long token).
+        // The window includes index 60: a hyphen there means the first 60
+        // chars are whole words, and they all fit. A hyphen in the first
+        // half does not count, because cutting there would throw most of
+        // the title away (a short first word before one long token).
+        match out[..=60].rfind('-').filter(|&idx| idx >= 30) {
+            Some(idx) => out.truncate(idx),
+            None => out.truncate(60),
+        }
         while out.ends_with('-') {
             out.pop();
         }
@@ -1782,6 +1835,66 @@ mod tests {
         assert!(!slug.ends_with('-'));
     }
 
+    /// #886: Latin diacritics fold to ASCII instead of splitting the word
+    /// into a hyphen (`estável` -> `estavel`, not `est-vel`).
+    #[test]
+    fn slugify_folds_latin_diacritics() {
+        assert_eq!(slugify_for_rule("Modelo estável"), "modelo-estavel");
+        assert_eq!(
+            slugify_for_rule("Política de retenção"),
+            "politica-de-retencao"
+        );
+        // Every pt-BR accented letter decomposes to ASCII.
+        assert_eq!(
+            slugify_for_rule("á é í ó ú â ê ô ã õ ç à ü"),
+            "a-e-i-o-u-a-e-o-a-o-c-a-u"
+        );
+    }
+
+    /// #886: a title longer than 60 chars is cut at a hyphen (word
+    /// boundary), not mid-word.
+    #[test]
+    fn slugify_truncates_at_word_boundary() {
+        let title = "aaaaaaaa bbbbbbbb cccccccc dddddddd eeeeeeee ffffffff gggggggg hhhhhhhh";
+        let slug = slugify_for_rule(title);
+        assert!(slug.len() <= 60);
+        assert!(!slug.ends_with('-'));
+        // The cut lands on the last whole word inside the budget, dropping
+        // the partial `gggggggg` rather than slicing it.
+        assert_eq!(
+            slug,
+            "aaaaaaaa-bbbbbbbb-cccccccc-dddddddd-eeeeeeee-ffffffff"
+        );
+    }
+
+    /// #886: a CJK-only title still folds to nothing and falls back to the
+    /// static slug — diacritic folding must not resurrect it.
+    #[test]
+    fn slugify_cjk_still_falls_back() {
+        assert_eq!(slugify_for_rule("中文标题"), "rule");
+    }
+
+    /// A slug whose first 60 chars already end on a whole word keeps that
+    /// word: the hyphen right after it (index 60) is the boundary, and a
+    /// window that stops before it dropped the word (follow-up to #886).
+    #[test]
+    fn slugify_keeps_a_word_that_ends_exactly_at_the_cap() {
+        let title = ["abcd"; 11].join(" ") + " abcde more";
+        let slug = slugify_for_rule(&title);
+        assert_eq!(slug, ["abcd"; 11].join("-") + "-abcde");
+        assert_eq!(slug.len(), 60);
+    }
+
+    /// A boundary in the first half would throw most of the title away: a
+    /// short word before one long token must not collapse the slug to that
+    /// word, so the cut falls back to the hard 60 (follow-up to #886).
+    #[test]
+    fn slugify_does_not_collapse_to_a_short_first_word() {
+        let slug = slugify_for_rule(&format!("a {}", "b".repeat(70)));
+        assert_eq!(slug.len(), 60);
+        assert!(slug.starts_with("a-bbb"), "slug collapsed to {slug:?}");
+    }
+
     fn update_with_summary(summary: Option<&str>) -> crate::types::ConsolidatedPageUpdate {
         crate::types::ConsolidatedPageUpdate {
             path: "concepts/queue.md".into(),
@@ -2097,6 +2210,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(req.frontmatter["slot_kind"], "state");
+    }
+
+    #[test]
+    fn build_update_appends_md_to_bare_non_rule_path() {
+        // #885: the LLM returns a multi-page path with no extension
+        // (`decisions/smart-model-luna`). The non-rule branch routes it
+        // through `slugify_page_path`, which must land it as a portable
+        // `.md` page rather than storing it extensionless.
+        let update = crate::types::ConsolidatedPageUpdate {
+            path: "decisions/smart-model-luna".into(),
+            tier: Tier::Semantic,
+            kind: crate::types::PageKind::Fact,
+            title: "Smart model Luna".into(),
+            body_markdown: "body".into(),
+            summary: None,
+            tags: Vec::new(),
+            slot_kind: SlotKind::State,
+            relations: Relations::default(),
+            entities: Vec::new(),
+        };
+        let (req, _) = build_update(
+            WorkspaceId::new(),
+            ProjectId::new(),
+            &update,
+            true,
+            &ai_memory_core::ActorContext::anonymous(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(req.path.as_str(), "decisions/smart-model-luna.md");
     }
 
     #[test]
@@ -2859,6 +3002,90 @@ mod tests {
                 outcome.path.as_str()
             );
         }
+    }
+
+    /// A batch with one page whose LLM-produced path contains a
+    /// Windows-illegal `:` (copied verbatim from a conventional-commit
+    /// subject, e.g. `build(sandbox): orchestrate`) must not abort the whole
+    /// run: `build_update` sanitizes the path in place (same class of fix as
+    /// bootstrap's #847) and the batch's sibling valid page survives. Before
+    /// the fix, the bad path passed `PagePath::new` (deliberately tolerant)
+    /// and only failed later at `ensure_portable` inside `Wiki::apply_batch`,
+    /// which is atomic — one bad page there lost every page in the batch
+    /// (#848).
+    #[tokio::test]
+    async fn batch_with_illegal_char_path_is_sanitized_not_aborted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, wiki, session, ws, proj) = batch_fixture(tmp.path()).await;
+        let response = serde_json::json!({
+            "rationale": "one bad path, one good",
+            "updates": [
+                {
+                    "path": "concepts/build(sandbox): orchestrate the run.md",
+                    "tier": "semantic",
+                    "kind": "fact",
+                    "title": "Bad path page",
+                    "body_markdown": "Bad path body.",
+                    "tags": []
+                },
+                {
+                    "path": "concepts/good.md",
+                    "tier": "semantic",
+                    "kind": "fact",
+                    "title": "Good path page",
+                    "body_markdown": "Good path body.",
+                    "tags": []
+                }
+            ]
+        });
+
+        let outcomes = Consolidator::new(
+            store.reader.clone(),
+            store.writer.clone(),
+            wiki.clone(),
+            Arc::new(ScriptedLlm(response)),
+            ws,
+            proj,
+        )
+        .consolidate_session_multi(
+            session,
+            false,
+            ai_memory_core::ActorContext::anonymous(),
+            None,
+            None,
+        )
+        .await
+        .expect("a sanitizable bad path must not fail (or abort) the whole batch");
+
+        assert_eq!(
+            outcomes.len(),
+            2,
+            "both pages, including the sanitized one, must be written"
+        );
+
+        let sanitized_path = outcomes
+            .iter()
+            .find(|o| o.path.as_str().starts_with("concepts/build"))
+            .expect("the offending page must still be written, under a sanitized path")
+            .path
+            .clone();
+        assert!(
+            !sanitized_path.as_str().contains(':'),
+            "the sanitized path must not contain the Windows-illegal `:`: {}",
+            sanitized_path.as_str()
+        );
+        assert!(
+            sanitized_path.ensure_portable().is_ok(),
+            "the sanitized path must pass the portability check"
+        );
+
+        let good = wiki
+            .read_page(ws, proj, &PagePath::new("concepts/good.md").unwrap())
+            .unwrap();
+        assert_eq!(good.frontmatter["title"], "Good path page");
+
+        let bad = wiki.read_page(ws, proj, &sanitized_path).unwrap();
+        assert_eq!(bad.frontmatter["title"], "Bad path page");
     }
 
     /// A batch whose single update targets `path` — the model chooses this

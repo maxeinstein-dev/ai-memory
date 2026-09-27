@@ -44,7 +44,7 @@ use ai_memory_workstream::{
     wait_for_transcript_flush,
 };
 
-use super::doctor::SCANNED_HARNESSES;
+use super::doctor::{SCANNED_HARNESSES, relocated_session_dir};
 use super::run;
 use crate::config::Config;
 use crate::http_client::{ServerEndpoint, get_json, post_json};
@@ -268,11 +268,22 @@ async fn collect_local_sessions(
     cwd: &Path,
     only_session: Option<&str>,
 ) -> Vec<SessionRef> {
+    collect_local_sessions_with(home, cwd, only_session, relocated_session_dir).await
+}
+
+/// [`collect_local_sessions`] with the relocation lookup passed in, for the
+/// same reason as `doctor::scan_local_with`: tests pass `|_| None` so a
+/// developer's `CLAUDE_CONFIG_DIR` cannot hide a fixture planted under a
+/// temporary `$HOME`.
+async fn collect_local_sessions_with(
+    home: &Path,
+    cwd: &Path,
+    only_session: Option<&str>,
+    session_dir_for: impl Fn(ManagedHarness) -> Option<PathBuf>,
+) -> Vec<SessionRef> {
     let mut out = Vec::new();
     for &harness in SCANNED_HARNESSES {
-        let session_dir = build_launch_plan(harness, None, Vec::new(), None)
-            .ok()
-            .and_then(|plan| plan.session_dir);
+        let session_dir = session_dir_for(harness);
         let Ok(sessions) = list_native_sessions(
             harness,
             home,
@@ -354,9 +365,7 @@ async fn import_one(
 
     let sid = &session.native_session_id;
     let agent = session.harness.agent_kind().as_str();
-    let occurred_ats = resolve_occurred_at(&transcript.events);
-    // The session starts at its first timestamped event, not at import time.
-    let first_occurred_at = occurred_ats.iter().flatten().next().cloned();
+    let resolved = resolve_occurred_at(&transcript.events);
     let mut items = Vec::with_capacity(transcript.events.len() + 2);
     items.push(hook_item(
         endpoint,
@@ -367,10 +376,10 @@ async fn import_one(
         sid,
         &format!("{sid}:session-start"),
         None,
-        serde_json::json!({ "session_id": sid, "occurred_at": first_occurred_at }),
+        serde_json::json!({ "session_id": sid, "occurred_at": resolved.earliest }),
     )?);
     let mut content = 0usize;
-    for (event, occurred_at) in transcript.events.iter().zip(&occurred_ats) {
+    for (event, occurred_at) in transcript.events.iter().zip(&resolved.per_event) {
         if let Some(mapped) = map_event(sid, event, occurred_at.as_deref()) {
             items.push(hook_item(
                 endpoint,
@@ -386,7 +395,6 @@ async fn import_one(
             content += 1;
         }
     }
-    let last_occurred_at = occurred_ats.into_iter().next_back().flatten();
     items.push(hook_item(
         endpoint,
         workspace,
@@ -396,28 +404,83 @@ async fn import_one(
         sid,
         &format!("{sid}:session-end"),
         None,
-        serde_json::json!({ "session_id": sid, "occurred_at": last_occurred_at }),
+        serde_json::json!({ "session_id": sid, "occurred_at": resolved.latest }),
     )?);
 
     post_hook_items(endpoint, &items).await?;
     Ok(content)
 }
 
-/// Resolve each event's effective `occurred_at`, letting one missing its own
-/// timestamp inherit the nearest preceding event's (spec §4). The last entry
-/// is therefore also the session's last known event time, used for the
-/// synthetic `session-end` item.
-fn resolve_occurred_at(events: &[NewWorkstreamEvent]) -> Vec<Option<String>> {
-    let mut last: Option<String> = None;
-    events
+/// Per-event `occurred_at` resolution for one transcript, plus the session's
+/// overall boundary times.
+struct ResolvedOccurredAt {
+    /// Effective `occurred_at` for each event, in transcript order (RFC 3339).
+    per_event: Vec<Option<String>>,
+    /// The earliest valid event time — the session-start's `occurred_at`.
+    /// A transcript is not guaranteed to be time-sorted (a reordered or
+    /// clock-skewed import), so the first *entry* is not reliably the
+    /// earliest *time*.
+    earliest: Option<String>,
+    /// The latest valid event time — the session-end's `occurred_at`, same
+    /// reasoning as `earliest`.
+    latest: Option<String>,
+}
+
+/// Resolve each event's effective `occurred_at`, letting one missing or
+/// unparsable own timestamp inherit the nearest preceding *valid* one; an
+/// event before the first valid timestamp inherits that first one instead of
+/// staying unresolved (there is nothing earlier to inherit from). A value
+/// that fails to parse as RFC 3339 is treated exactly like a missing one — it
+/// never reaches the hook body, so a malformed transcript timestamp cannot
+/// masquerade as a validated one downstream.
+fn resolve_occurred_at(events: &[NewWorkstreamEvent]) -> ResolvedOccurredAt {
+    let valid: Vec<Option<jiff::Timestamp>> = events
         .iter()
         .map(|event| {
-            if event.occurred_at.is_some() {
-                last = event.occurred_at.clone();
-            }
-            last.clone()
+            event
+                .occurred_at
+                .as_deref()
+                .and_then(|s| s.parse::<jiff::Timestamp>().ok())
         })
-        .collect()
+        .collect();
+
+    let mut per_event: Vec<Option<jiff::Timestamp>> = Vec::with_capacity(events.len());
+    let mut last_valid: Option<jiff::Timestamp> = None;
+    for ts in &valid {
+        if ts.is_some() {
+            last_valid = *ts;
+        }
+        per_event.push(last_valid);
+    }
+    // Backward-fill the leading gap: events before the first valid timestamp
+    // had nothing preceding them to inherit above.
+    if let Some(first_valid) = valid.iter().copied().flatten().next() {
+        for slot in per_event.iter_mut() {
+            match slot {
+                Some(_) => break,
+                None => *slot = Some(first_valid),
+            }
+        }
+    }
+
+    let (earliest, latest) = valid.into_iter().flatten().fold(
+        (None, None),
+        |(min, max): (Option<jiff::Timestamp>, Option<jiff::Timestamp>), ts| {
+            (
+                Some(min.map_or(ts, |m| m.min(ts))),
+                Some(max.map_or(ts, |m| m.max(ts))),
+            )
+        },
+    );
+
+    ResolvedOccurredAt {
+        per_event: per_event
+            .into_iter()
+            .map(|ts| ts.map(|t| t.to_string()))
+            .collect(),
+        earliest: earliest.map(|t| t.to_string()),
+        latest: latest.map(|t| t.to_string()),
+    }
 }
 
 /// A transcript event mapped to its `/hook` shape.
@@ -433,12 +496,9 @@ struct MappedEvent {
 /// a backfill extension observation. Non-content boundary events (compaction,
 /// checkpoint, annotation) are dropped — they are not session content.
 ///
-/// `occurred_at` is the event's own original time (RFC 3339), already resolved
-/// by the caller — an event missing its own timestamp inherits the nearest
-/// preceding one, so this always reflects a real point in the transcript when
-/// any event in it carried one. It rides in the hook body next to the other
-/// event fields; the receiving `/hook` endpoint parses and bounds it (see
-/// `HookEnvelope::occurred_at_micros`) before it ever reaches storage.
+/// `occurred_at` (RFC 3339), already resolved by the caller, rides in the hook
+/// body so the imported observation is dated at the transcript's own event
+/// time rather than at import time.
 fn map_event(
     session_id: &str,
     event: &NewWorkstreamEvent,
@@ -747,6 +807,13 @@ mod tests {
         assert_eq!(t.source_event.as_deref(), Some("tool_call"));
     }
 
+    /// Round-trips a literal RFC 3339 string through `jiff::Timestamp` so
+    /// expectations match `resolve_occurred_at`'s own parse-then-format
+    /// output rather than assuming it echoes the input string verbatim.
+    fn ts(literal: &str) -> String {
+        literal.parse::<jiff::Timestamp>().unwrap().to_string()
+    }
+
     #[test]
     fn resolve_occurred_at_fills_gaps_from_the_preceding_event() {
         let mut e1 = event(WorkstreamEventKind::Message, Some("user"), "one");
@@ -758,14 +825,79 @@ mod tests {
 
         let resolved = resolve_occurred_at(&[e1, e2, e3, e4]);
         assert_eq!(
-            resolved,
+            resolved.per_event,
             vec![
-                Some("2026-09-10T12:00:00Z".to_string()),
-                Some("2026-09-10T12:00:00Z".to_string()),
-                Some("2026-09-10T12:05:00Z".to_string()),
-                Some("2026-09-10T12:05:00Z".to_string()),
+                Some(ts("2026-09-10T12:00:00Z")),
+                Some(ts("2026-09-10T12:00:00Z")),
+                Some(ts("2026-09-10T12:05:00Z")),
+                Some(ts("2026-09-10T12:05:00Z")),
             ],
             "an event without its own timestamp inherits the nearest preceding one"
+        );
+        assert_eq!(resolved.earliest, Some(ts("2026-09-10T12:00:00Z")));
+        assert_eq!(resolved.latest, Some(ts("2026-09-10T12:05:00Z")));
+    }
+
+    #[test]
+    fn resolve_occurred_at_backfills_the_leading_gap_from_the_first_valid_timestamp() {
+        let e1 = event(WorkstreamEventKind::Message, Some("user"), "one"); // no timestamp
+        let e2 = event(WorkstreamEventKind::Message, Some("assistant"), "two"); // no timestamp
+        let mut e3 = event(WorkstreamEventKind::ToolCall, None, "three");
+        e3.occurred_at = Some("2026-09-10T12:05:00Z".to_string());
+
+        let resolved = resolve_occurred_at(&[e1, e2, e3]);
+        assert_eq!(
+            resolved.per_event,
+            vec![
+                Some(ts("2026-09-10T12:05:00Z")),
+                Some(ts("2026-09-10T12:05:00Z")),
+                Some(ts("2026-09-10T12:05:00Z")),
+            ],
+            "events before the first valid timestamp inherit it backward, \
+             not just the ones after"
+        );
+    }
+
+    #[test]
+    fn resolve_occurred_at_treats_an_unparsable_timestamp_as_missing() {
+        let mut e1 = event(WorkstreamEventKind::Message, Some("user"), "one");
+        e1.occurred_at = Some("2026-09-10T12:00:00Z".to_string());
+        let mut e2 = event(WorkstreamEventKind::Message, Some("assistant"), "two");
+        e2.occurred_at = Some("not-a-timestamp".to_string());
+
+        let resolved = resolve_occurred_at(&[e1, e2]);
+        assert_eq!(
+            resolved.per_event,
+            vec![
+                Some(ts("2026-09-10T12:00:00Z")),
+                Some(ts("2026-09-10T12:00:00Z"))
+            ],
+            "an unparsable timestamp must not reach the hook body; the \
+             preceding valid one is inherited instead"
+        );
+        assert_eq!(resolved.latest, Some(ts("2026-09-10T12:00:00Z")));
+    }
+
+    #[test]
+    fn resolve_occurred_at_uses_min_and_max_not_first_and_last_when_out_of_order() {
+        // A transcript is not guaranteed to be time-sorted (clock skew,
+        // reordering); the session boundary must reflect the actual extremes,
+        // not just the first/last entries.
+        let mut e1 = event(WorkstreamEventKind::Message, Some("user"), "one");
+        e1.occurred_at = Some("2026-09-10T12:05:00Z".to_string());
+        let mut e2 = event(WorkstreamEventKind::Message, Some("assistant"), "two");
+        e2.occurred_at = Some("2026-09-10T12:00:00Z".to_string());
+
+        let resolved = resolve_occurred_at(&[e1, e2]);
+        assert_eq!(
+            resolved.earliest,
+            Some(ts("2026-09-10T12:00:00Z")),
+            "earliest must be the minimum valid time, not the first entry"
+        );
+        assert_eq!(
+            resolved.latest,
+            Some(ts("2026-09-10T12:05:00Z")),
+            "latest must be the maximum valid time, not the last entry"
         );
     }
 
@@ -775,7 +907,10 @@ mod tests {
             event(WorkstreamEventKind::Message, Some("user"), "one"),
             event(WorkstreamEventKind::Message, Some("assistant"), "two"),
         ];
-        assert_eq!(resolve_occurred_at(&events), vec![None, None]);
+        let resolved = resolve_occurred_at(&events);
+        assert_eq!(resolved.per_event, vec![None, None]);
+        assert_eq!(resolved.earliest, None);
+        assert_eq!(resolved.latest, None);
     }
 
     #[test]
@@ -833,7 +968,7 @@ mod tests {
         });
         std::fs::write(session_dir.join("foreign.jsonl"), format!("{foreign}\n")).unwrap();
 
-        let found = collect_local_sessions(home.path(), cwd.path(), None).await;
+        let found = collect_local_sessions_with(home.path(), cwd.path(), None, |_| None).await;
         let claude: Vec<_> = found
             .iter()
             .filter(|s| s.harness == ManagedHarness::Claude)
@@ -845,7 +980,8 @@ mod tests {
         );
 
         // `--session` narrows to one id.
-        let only = collect_local_sessions(home.path(), cwd.path(), Some("nope")).await;
+        let only =
+            collect_local_sessions_with(home.path(), cwd.path(), Some("nope"), |_| None).await;
         assert!(only.is_empty(), "no session matches the filter: {only:?}");
     }
 

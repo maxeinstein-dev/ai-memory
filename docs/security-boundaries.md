@@ -43,6 +43,7 @@ boundary not yet built.
 | 11c | Capture hook ≤200ms budget (invariant #5) | `hooks/_lib.sh` capture path `curl --max-time 0.2` (context-fetch 1.0s and background drain 2.0s are separate, larger-budget paths) | none (shell-script timeout; hard to unit-test) — watch on any capture-path change | WATCH |
 | 12 | Network/auth posture | `config.rs` loopback `DEFAULT_BIND`; `serve.rs` `validate_http_exposure`, `require_allowed_host`; `auth.rs` `require_bearer` | `serve.rs` host-guard (missing→400 / forged→403), non-loopback-requires-token; `auth.rs` wrong-token 401 | STRONG |
 | 13 | Managed-run transcript attribution (concurrent launches in one checkout, invariant #16) | `ai-memory-store/src/workstream.rs` `link_native_session` stamps `native_session_linked_at` on its own run only, both `finish` updates drop the stamp when the session changes, `run_status` reports it; `ai-memory-cli/src/commands/run.rs` `resolve_native_session_after_run` takes a linked session only when `ai-memory-workstream` `native_session_in_checkout` holds it for this checkout (OpenCode by recorded directory), and never falls back to a link it set aside | `multi_session.rs` `a_session_linked_by_one_managed_run_is_not_another_runs`; `run.rs` `a_session_linked_during_the_run_wins_over_discovery` (concurrent newer session, another checkout's link refused, no fallback to it, unlinked control); `transcript.rs` `native_session_in_checkout_checks_the_opencode_directory`; `store/src/lib.rs` `managed_run_status_reports_a_link_made_during_the_run` | PARTIAL: a run whose child links nothing still falls back to discovering the newest session in the checkout |
+| 14 | Client-supplied event time is bounded and self-scoped (#919) | `ai-memory-hooks/src/payload.rs` `HookEnvelope::occurred_at_micros` — a `/hook` caller's optional `occurred_at` must be `> 0` and `<= now + 5min`; it only sets the caller's *own* admitted session's `started_at`/`ended_at`/`created_at`, never another session/project/user, and the ingest dedup `seen_at`/TTL stays on `now` | `payload.rs` `occurred_at_micros_rejects_a_far_future_timestamp`, `…_rejects_non_positive_values`, `…_rejects_garbage_strings` | MEDIUM — self-scoped numeric bound; no cross-tenant surface (a client already controls its own content) |
 | — | Per-project authorization (#708) | proposal only — `docs/design-per-project-authz.md` (`authorize_project` choke point + unscoped-read/raw-id bypass classes) | none yet — the design's "Verification plan" tests (authz matrix, unscoped-read-leak, raw-id-authz, ship-inert) land WITH the code | FUTURE |
 
 ## Keeping this current (the standing protocol)
@@ -68,11 +69,8 @@ boundary not yet built.
 
 ## Fork alfama (painel web)
 
-> This file is brought in verbatim from the original's `main`, past its
-> `v2.4.0` tag — the fork's own `AGENTS.md` predates the "security-boundary
-> tests are adversarial and mandatory" rule quoted above, and some of the
-> original's rows above cite tests that will only exist in this checkout
-> after the fork rebases onto the next release. The section below is the
+> Everything above this section is the original's file verbatim as of its
+> `v2.4.1` tag, which the fork is synced to. The section below is the
 > fork's own addition, for the read-only `/web` screens added by
 > `docs/alfama/specs/2026-09-24-painel-web-alfama-design.md` (§2.1/§2.2).
 

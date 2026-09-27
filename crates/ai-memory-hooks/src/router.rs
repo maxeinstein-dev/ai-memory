@@ -1762,9 +1762,8 @@ async fn resolve_project_ids_inner(
     project_override: Option<&str>,
     project_strategy: ProjectStrategy,
 ) -> anyhow::Result<(WorkspaceId, ProjectId)> {
-    let cwd_norm = cwd
-        .filter(|s| !s.is_empty())
-        .map(normalize_project_path_key);
+    let cwd_raw = cwd.filter(|s| !s.is_empty());
+    let cwd_norm = cwd_raw.map(normalize_project_path_key);
 
     // Without cwd AND without a project override, there's nothing to
     // resolve — fall through to the server defaults.
@@ -1790,23 +1789,32 @@ async fn resolve_project_ids_inner(
         .unwrap_or(DEFAULT_WORKSPACE_NAME)
         .to_string();
 
-    let (project_name, repo_path) = match (project_override, cwd_norm.as_deref()) {
-        (Some(p), Some(c)) => (
+    // The project NAME must come from the RAW cwd: `normalize_project_path_key`
+    // ASCII-lowercases the *entire* Windows drive-letter/UNC path — basename
+    // included — so deriving the name from `cwd_norm` mints "default project"
+    // for a folder the CLI (which keeps the raw basename) calls "Default
+    // Project". `get_or_create_project` matches names case-sensitively, so one
+    // folder becomes two projects (#871). The cache key and the cwd-prefix
+    // match below deliberately keep `cwd_norm` (case-folded) so #806 handoff
+    // stickiness is unaffected, and `derive_project_from_cwd` re-normalizes the
+    // repo_path it returns regardless of the input casing.
+    let (project_name, repo_path) = match (project_override, cwd_raw, cwd_norm.as_deref()) {
+        (Some(p), _, Some(c)) => (
             p.to_string(),
             repo_path_from_project_override(c, p, project_strategy),
         ),
-        (Some(p), None) => (p.to_string(), None),
-        (None, Some(c)) => match derive_project_from_cwd(c, project_strategy) {
+        (Some(p), _, None) => (p.to_string(), None),
+        (None, Some(raw), Some(_)) => match derive_project_from_cwd(raw, project_strategy) {
             Some(resolved) => resolved,
             None => return Ok((state.workspace_id, state.project_id)),
         },
-        (None, None) => {
+        _ => {
             // The early-return at the top of the function guards
-            // against this branch; the explicit fallback here keeps
-            // the resolver panic-free if that guard ever moves or
-            // gets refactored. Same effect as `unreachable!`, but
-            // visible at compile time instead of inside the panic
-            // message.
+            // against a cwd-less, override-less event; the explicit
+            // fallback here keeps the resolver panic-free if that guard
+            // ever moves or gets refactored. Same effect as
+            // `unreachable!`, but visible at compile time instead of
+            // inside the panic message.
             return Ok((state.workspace_id, state.project_id));
         }
     };
@@ -2877,7 +2885,14 @@ fn build_auto_handoff(
                     prompts.push(text.to_string());
                 }
             }
-            ObservationKind::PostToolUse | ObservationKind::PreToolUse if !obs.title.is_empty() => {
+            // Skip `tool <family>` / bare-`<family>` labels: a family is a
+            // partition of the calls, not a name for a tool, so "Tools used:
+            // tool file, tool non-file" tells the receiver nothing. Only a
+            // harness's own tool name is worth listing.
+            ObservationKind::PostToolUse | ObservationKind::PreToolUse
+                if !obs.title.is_empty()
+                    && crate::payload::tool_family_from_title(&obs.title).is_none() =>
+            {
                 tools.insert(obs.title.as_str());
             }
             _ => {}
@@ -2963,10 +2978,12 @@ fn derive_open_questions(
     // abnormally while working in the tree.
     //
     // The signal is the tool *family*, not the tool name. A PostToolUse
-    // observation's title is `canonical_tool_name(tool_family)`, which is
-    // only ever "file" / "search-list" / "non-file" / "unknown" — the
-    // reserved protocol deliberately carries no raw tool names. Matching
-    // "edit"/"write"/"patch" against that title can never succeed.
+    // observation's title carries the family in one of two spellings: the
+    // majority path (every closed-tool agent) writes `safe_tool_title`'s
+    // `"tool file"` / `"tool non-file"` / …, while the reserved-protocol
+    // path writes the bare `canonical_tool_name` form `"file"` / …. Both
+    // must match here, and `tool_family_from_title` recognises both; a raw
+    // tool name ("edit"/"write"/"patch") is neither and correctly does not.
     //
     // That same closed schema means read and write are indistinguishable:
     // `ToolFamily::File` covers both, and `ToolOutcome` is only
@@ -2974,7 +2991,8 @@ fn derive_open_questions(
     // made — only that the session touched files and then ended without a
     // normal Stop, which is worth telling the receiver either way.
     if let Some(tool) = last_tool {
-        let touched_files = tool.title == canonical_tool_name(ToolFamily::File);
+        let touched_files =
+            crate::payload::tool_family_from_title(&tool.title) == Some(ToolFamily::File);
         if touched_files && last_stop.is_none() {
             return vec![
                 "Session ended without a normal stop while working with files".into(),
@@ -10743,6 +10761,94 @@ mod tests {
         );
     }
 
+    /// A Windows cwd whose basename carries uppercase letters must resolve
+    /// to the SAME project the CLI would (which keeps the raw basename), not
+    /// a lowercased twin. `normalize_project_path_key` folds the whole
+    /// drive-letter path, so deriving the name from the normalized cwd used
+    /// to mint "default project" beside the CLI's "Default Project" for one
+    /// folder (#871). The cache key must stay case-folded so #806 handoff
+    /// stickiness is not regressed.
+    #[tokio::test]
+    async fn windows_casing_does_not_split_project() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let cwd_win = r"D:\path\to\Default Project";
+
+        // What the CLI derives for the same raw cwd (original case).
+        let (cli_name, _) = ai_memory_consolidate::derive_project_name(
+            std::path::Path::new(cwd_win),
+            ai_memory_consolidate::ProjectNameStrategy::Basename,
+        )
+        .expect("CLI derives a basename for a Windows path");
+        assert_eq!(cli_name, "Default Project");
+
+        let (_, proj_hook) = resolve_project_ids(
+            &state,
+            Some(cwd_win),
+            None,
+            None,
+            ProjectStrategy::Basename,
+            &ai_memory_core::ActorKey::default(),
+        )
+        .await
+        .unwrap();
+
+        // The hook-derived project must equal the one the CLI's name maps to.
+        let (_, proj_cli) = resolve_project_ids(
+            &state,
+            Some(cwd_win),
+            None,
+            Some(&cli_name),
+            ProjectStrategy::Basename,
+            &ai_memory_core::ActorKey::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            proj_hook, proj_cli,
+            "hook must resolve the case-preserved CLI project, not a lowercased twin"
+        );
+
+        // Prove it bites: the lowercased name is a *different* project.
+        let (_, proj_lower) = resolve_project_ids(
+            &state,
+            Some(cwd_win),
+            None,
+            Some("default project"),
+            ProjectStrategy::Basename,
+            &ai_memory_core::ActorKey::default(),
+        )
+        .await
+        .unwrap();
+        assert_ne!(
+            proj_hook, proj_lower,
+            "case-folded basename must NOT be the project the hook resolves"
+        );
+
+        // Paired assertion: the cache key stays case-folded (repo_path /
+        // stickiness namespace unchanged) even though the NAME is preserved.
+        let cache = state.project_cache.lock().await;
+        let strat = ProjectStrategy::Basename.as_str().to_string();
+        assert!(
+            cache.contains_key(&(
+                "d:/path/to/default project".to_string(),
+                String::new(),
+                String::new(),
+                strat.clone(),
+            )),
+            "cache key must remain case-folded for #806 stickiness"
+        );
+        assert!(
+            !cache.contains_key(&(
+                "D:/path/to/Default Project".to_string(),
+                String::new(),
+                String::new(),
+                strat,
+            )),
+            "cache key must not carry the original-case basename"
+        );
+    }
+
     /// Two events resolved with overrides land in the same `(ws, proj)`
     /// pair as long as the override names match — even if the `cwd`
     /// differs. Confirms the override is the source of truth.
@@ -12476,6 +12582,29 @@ mod tests {
         assert!(q[1].contains("working tree"), "got: {q:?}");
     }
 
+    /// The same file-activity heuristic, but for the *majority* spelling: every
+    /// closed-tool agent stores `safe_tool_title`'s `"tool file"`, not the bare
+    /// `canonical_tool_name` `"file"` of the reserved-protocol path. Before
+    /// #895 this spelling never matched, so the heuristic was dead for almost
+    /// every real session.
+    #[test]
+    fn open_questions_detects_abnormal_exit_after_prefixed_file_activity() {
+        let obs = vec![
+            mk_obs(ObservationKind::UserPrompt, "fix bug", "fix the bug"),
+            mk_obs(
+                ObservationKind::PostToolUse,
+                "tool file",
+                "tool_family: file\noutcome: unknown",
+            ),
+            // No Stop observation — session ended mid-task.
+        ];
+        let last = Some("fix the bug".to_string());
+        let q = derive_open_questions(&obs, &last);
+        assert_eq!(q.len(), 2, "got: {q:?}");
+        assert!(q[0].contains("without a normal stop"), "got: {q:?}");
+        assert!(q[1].contains("working tree"), "got: {q:?}");
+    }
+
     /// Guard against the regression this heuristic already had once: only
     /// titles the ingest path can actually produce may drive it, so a raw
     /// tool name must NOT trigger the file branch.
@@ -12493,6 +12622,66 @@ mod tests {
                  drive the file heuristic; got: {q:?}"
             );
         }
+    }
+
+    /// An automatic handoff built only from closed-tool observations (whose
+    /// titles are `safe_tool_title`'s `"tool file"` / `"tool non-file"` family
+    /// labels) must NOT emit a `Tools used:` line: a family is a partition of
+    /// the calls, not a name for a tool, so the label leaks nothing useful into
+    /// the handoff. A real tool name still produces the line (#895).
+    #[test]
+    fn auto_handoff_omits_tool_family_labels_from_tools_used() {
+        use ai_memory_core::{ProjectId, WorkspaceId};
+        let observations = vec![
+            mk_obs(ObservationKind::UserPrompt, "fix bug", "fix the bug"),
+            mk_obs(
+                ObservationKind::PostToolUse,
+                "tool file",
+                "tool_family: file\noutcome: unknown",
+            ),
+            mk_obs(
+                ObservationKind::PostToolUse,
+                "tool non-file",
+                "tool_family: non-file\noutcome: success",
+            ),
+        ];
+        let handoff = build_auto_handoff(
+            WorkspaceId::new(),
+            ProjectId::new(),
+            AgentKind::ClaudeCode,
+            SessionId::new(),
+            None,
+            &observations,
+            None,
+        );
+        assert!(
+            handoff
+                .next_steps
+                .iter()
+                .all(|s| !s.starts_with("Tools used:")),
+            "family labels must not surface as a Tools used line; got: {:?}",
+            handoff.next_steps
+        );
+
+        // Control: a real harness tool name still produces the line.
+        let with_real_tool = vec![
+            mk_obs(ObservationKind::UserPrompt, "fix bug", "fix the bug"),
+            mk_obs(ObservationKind::PostToolUse, "Edit", "edited main.rs"),
+        ];
+        let handoff = build_auto_handoff(
+            WorkspaceId::new(),
+            ProjectId::new(),
+            AgentKind::ClaudeCode,
+            SessionId::new(),
+            None,
+            &with_real_tool,
+            None,
+        );
+        assert!(
+            handoff.next_steps.iter().any(|s| s == "Tools used: Edit"),
+            "a real tool name must still be listed; got: {:?}",
+            handoff.next_steps
+        );
     }
 
     /// A search/list tool is file-adjacent but not file activity; it must
@@ -12599,5 +12788,111 @@ mod tests {
         assert!(is_acknowledgment("谢谢"));
         assert!(!is_acknowledgment("fix the bug in main.rs"));
         assert!(!is_acknowledgment("what is the return type?"));
+    }
+
+    /// End-to-end proof that a client-supplied `occurred_at` reaches every
+    /// timestamp column it is supposed to via the real `/hook` ingest path
+    /// (`process_authorized` -> `admit_hook_session_event` for the session
+    /// row, `insert_observation*` for the observation), not just the
+    /// lower-level store functions those handlers call. `admit_hook_session_event`
+    /// creates the `sessions` row on its own INSERT, separate from
+    /// `begin_session_row`, so this is the path a real backfilled
+    /// session-start actually takes.
+    #[tokio::test]
+    async fn hook_occurred_at_stamps_session_and_observation_times_end_to_end() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+        let session = "occurred-at-e2e";
+        let start_at = "2025-09-10T12:00:00Z";
+        let prompt_at = "2025-09-10T12:01:00Z";
+        let end_at = "2025-09-10T12:05:00Z";
+        let envelope = |event: &str, occurred_at: &str, prompt: Option<&str>| {
+            let mut body = serde_json::json!({
+                "session_id": session,
+                "occurred_at": occurred_at,
+            });
+            if let Some(prompt) = prompt {
+                body["prompt"] = serde_json::json!(prompt);
+            }
+            HookEnvelope::from_query_and_body(
+                HookQuery {
+                    event: event.into(),
+                    agent: Some("claude-code".into()),
+                    workspace: Some("default".into()),
+                    project: Some("scratch".into()),
+                    ..Default::default()
+                },
+                body,
+            )
+        };
+
+        process(
+            &state,
+            envelope("session-start", start_at, None),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        process(
+            &state,
+            envelope("user-prompt-submit", prompt_at, Some("backfilled prompt")),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        process(
+            &state,
+            envelope("session-end", end_at, None),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+
+        let session_id = resolve_native_session_id(session);
+        let summary = state
+            .reader
+            .session_summary_scoped(
+                state.workspace_id,
+                state.project_id,
+                session_id,
+                ai_memory_core::OwnerFilter::Any,
+            )
+            .await
+            .unwrap()
+            .expect("session row exists");
+        let expected_start = start_at.parse::<jiff::Timestamp>().unwrap().to_string();
+        let expected_end = end_at.parse::<jiff::Timestamp>().unwrap().to_string();
+        assert_eq!(
+            summary.started_at, expected_start,
+            "started_at must come from the session-start event's occurred_at, \
+             not import time (admit_hook_session_event's own INSERT)"
+        );
+        assert_eq!(
+            summary.ended_at.as_deref(),
+            Some(expected_end.as_str()),
+            "ended_at must come from the session-end event's occurred_at"
+        );
+        assert!(
+            summary.started_at <= expected_end,
+            "a backfilled session must not end before it starts"
+        );
+
+        let observations = state
+            .reader
+            .observations_for_session(session_id)
+            .await
+            .unwrap();
+        let prompt_obs = observations
+            .iter()
+            .find(|o| o.body == "backfilled prompt")
+            .expect("the user-prompt observation was recorded");
+        let expected_prompt_at = prompt_at.parse::<jiff::Timestamp>().unwrap();
+        assert_eq!(
+            prompt_obs.created_at, expected_prompt_at,
+            "created_at must come from the observation's own occurred_at"
+        );
     }
 }

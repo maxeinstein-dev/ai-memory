@@ -252,6 +252,26 @@ and older clients cannot bypass it. The typed sanitizer boundary then applies a
 16 KiB backstop to every durable observation body after redaction. The
 separately gated Claude Code assistant/Stop excerpt remains capped at 2 KB.
 
+An optional RFC 3339 `occurred_at` on the hook body lets a client supply the
+event's own original time — currently only `ai-memory backfill`, replaying a
+transcript's per-event timestamps, so imported sessions/observations are
+stamped with when they actually happened instead of import time. It is read
+from the top level of the body only (unlike the nested `payload`/`event`/
+`properties`/`info`/`path` search other hook fields use), so a real harness
+payload that happens to carry an `occurred_at` key somewhere in its own
+structure is never mistaken for this field. It is numeric metadata, not text,
+so it never goes through the sanitizer (outside invariant #6's boundary); it
+is still client-controlled input over `/hook`, so
+`HookEnvelope::occurred_at_micros` bounds it (must be > 0 and no more than
+five minutes ahead of server time) before trusting it. Anything else —
+missing, unparsable, or out of bounds — resolves to `None`, which the store
+treats as "now", never an error, keeping hooks fire-and-forget (invariant #5).
+A backfilled session's `ended_at` can therefore land well in the past, which
+can push it below the auto-improve watermark and the experience-pass anchor
+(both keyed on `ended_at`), and a retention window measured from an
+observation's own time can make an old backfilled observation immediately
+prunable rather than only after it ages in place.
+
 ## Storage architecture
 
 **Two layers, one source of truth.**
@@ -282,7 +302,7 @@ separately gated Claude Code assistant/Stop excerpt remains capped at 2 KB.
 | `pages` | Versioned wiki pages with `is_latest` + `supersedes` chain. M8 columns: `last_accessed_at`, `access_count`, and decay-only tombstone marker `superseded_at`. M9 cols: `embedding_provider`, `embedding_model`, `embedding_dim`. V36: `expires_at` (frontmatter TTL). V37: `salience` (NULL = `salience_default`; derived from `page_feedback`). |
 | `pages_fts` | FTS5 virtual table over `(title, body)`, auto-synced by triggers. |
 | `sessions`, `observations` | Sanitized, bounded lifecycle-hook projections. `sessions.ended_observation_count` is the stable generation watermark for resumed-session re-end eligibility; wall clocks are not used for that decision. They are an operational audit trail, not a complete native transcript. |
-| `session_consolidation_jobs` | Durable, observation-generation-idempotent queue for opt-in SessionEnd LLM consolidation. One bounded server worker leases jobs, retries provider failures with backoff, and recovers expired leases after restart. |
+| `session_consolidation_jobs` | Durable, observation-generation-idempotent queue for the *automatic* SessionEnd LLM consolidation worker. One bounded server worker leases jobs, retries provider failures with backoff, and recovers expired leases after restart. A manual `memory_consolidate` writes its page out-of-band and then reconciles this table (flipping a `failed`/`pending`/`superseded` row for the session to `completed`, never touching a live `running` lease), so the operator does not see a `failed` job for a session that is in fact consolidated. |
 | `observations_fts` | FTS5 virtual table over raw observation `(title, body)`, used only as bounded fallback. |
 | `workstreams`, `managed_runs`, `workstream_native_sessions` | Optional lease state plus per-harness native source and delivery cursors for `ai-memory run`. |
 | `workstream_events`, `workstream_events_fts` | Append-only normalized visible transcript events and full-text search; immutable sanitized source batches also live under `raw/workstreams/`. |
@@ -599,7 +619,16 @@ prefixed `AI_MEMORY_*`.
 
 ```toml
 bind = "127.0.0.1:49374"
-log_level = "info"
+log_level = "info"                 # default filter also pins `rmcp=warn` (the MCP SDK's
+                                   # per-request info logs) and drops the 30s reconcile
+                                   # summary to debug (#894). Restore either via log_level
+                                   # (e.g. "info,rmcp=info", "debug") or RUST_LOG;
+                                   # `tracing_appender=warn` stays forced (feedback-loop guard)
+tcp_keepalive_secs = 60            # idle time before TCP keepalive probes an accepted `serve`
+                                   # connection; reaps sockets left half-open by a dead peer
+                                   # (laptop sleep, VPN flap) that would otherwise leak fds
+                                   # until EMFILE (#792). 0 disables keepalive. Env:
+                                   # AI_MEMORY_TCP_KEEPALIVE_SECS
 
 # Capture / launch UX (all default-on where noted). Each has an AI_MEMORY_* env
 # override (AI_MEMORY_CAPTURE_ASSISTANT / AI_MEMORY_BACKFILL_ON_START /

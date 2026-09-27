@@ -202,7 +202,10 @@ engines (Ollama, LM Studio, vLLM): it needs no API key and requires explicit
 `AI_MEMORY_EMBEDDING_BASE_URL`, `AI_MEMORY_EMBEDDING_MODEL`, and
 `AI_MEMORY_EMBEDDING_DIM`. The optional `EMBEDDING_API_KEY` credentials the
 embedder alone and is checked before `OPENAI_API_KEY` and `LLM_API_KEY`, so
-embeddings can run on a different provider than the LLM. Both the FTS-only and
+embeddings can run on a different provider than the LLM. Because the two
+endpoints are independent, `AI_MEMORY_LLM_BASE_URL` redirects only the LLM;
+set `AI_MEMORY_EMBEDDING_BASE_URL` as well or embedding traffic still goes to
+the embedding provider's default endpoint. Both the FTS-only and
 hybrid paths apply the same bounded page-authority adjustment after candidate
 generation; embeddings improve relevance recall but do not decide which source
 is canonical.

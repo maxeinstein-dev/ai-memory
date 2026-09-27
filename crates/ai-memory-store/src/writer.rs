@@ -227,6 +227,10 @@ pub(crate) enum WriteCmd {
         job: SessionConsolidationJob,
         reply: oneshot::Sender<StoreResult<()>>,
     },
+    ReconcileSessionConsolidationCompleted {
+        session_id: SessionId,
+        reply: oneshot::Sender<StoreResult<usize>>,
+    },
     InsertHandoff {
         handoff: NewHandoff,
         reply: oneshot::Sender<StoreResult<HandoffId>>,
@@ -452,6 +456,10 @@ pub(crate) enum WriteCmd {
     /// One-shot in-place OKF conformance of every latest page row.
     OkfMigrateLatestPages {
         reply: oneshot::Sender<StoreResult<Vec<ops::OkfMigratedPage>>>,
+    },
+    /// Idempotent in-place repair of date-only OKF `stale_after` values.
+    RepairDateOnlyStaleAfter {
+        reply: oneshot::Sender<StoreResult<ops::StaleAfterRepair>>,
     },
     /// Read-only count of latest rows still lacking OKF conformance.
     OkfNonconformantCount {
@@ -1255,6 +1263,22 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Reconcile a session's durable consolidation job row to `completed` after
+    /// a manual `memory_consolidate` produced the page out-of-band. Never
+    /// touches a `running` lease. Returns the number of rows updated.
+    pub async fn reconcile_session_consolidation_completed(
+        &self,
+        session_id: SessionId,
+    ) -> StoreResult<usize> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::ReconcileSessionConsolidationCompleted {
+            session_id,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Insert a new handoff in `open` state.
     ///
     /// # Errors
@@ -1967,6 +1991,20 @@ impl WriterHandle {
             reply: tx,
         })
         .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Repair, in place, the OKF `stale_after` that older builds copied
+    /// verbatim from a date-only `expires_at`; returns every date-only page
+    /// so the wiki layer can align the files.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] if the actor has shut down, or
+    /// propagates the SQL error.
+    pub async fn repair_date_only_stale_after(&self) -> StoreResult<ops::StaleAfterRepair> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::RepairDateOnlyStaleAfter { reply: tx })
+            .await?;
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
@@ -3039,6 +3077,13 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 let result = crate::session_consolidation::release(&mut conn, &job);
                 send_or_warn(reply, result, "release_session_consolidation");
             }
+            WriteCmd::ReconcileSessionConsolidationCompleted { session_id, reply } => {
+                let result =
+                    crate::session_consolidation::reconcile_session_consolidation_completed(
+                        &mut conn, session_id,
+                    );
+                send_or_warn(reply, result, "reconcile_session_consolidation_completed");
+            }
             WriteCmd::InsertHandoff { handoff, reply } => {
                 let result = ops::insert_handoff(&mut conn, &handoff);
                 send_or_warn(reply, result, "insert_handoff");
@@ -3375,6 +3420,10 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             WriteCmd::OkfMigrateLatestPages { reply } => {
                 let result = ops::okf_migrate_latest_pages(&mut conn);
                 send_or_warn(reply, result, "okf_migrate_latest_pages");
+            }
+            WriteCmd::RepairDateOnlyStaleAfter { reply } => {
+                let result = ops::repair_date_only_stale_after(&mut conn);
+                send_or_warn(reply, result, "repair_date_only_stale_after");
             }
             WriteCmd::OkfNonconformantCount { reply } => {
                 let result = ops::okf_nonconformant_latest_pages(&conn);

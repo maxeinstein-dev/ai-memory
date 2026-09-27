@@ -25,6 +25,12 @@ use serde::{Deserialize, Serialize};
 /// Default HTTP bind address for the local single-user server.
 pub const DEFAULT_BIND: &str = "127.0.0.1:49374";
 
+/// Default idle time (seconds) before TCP keepalive probes start on an
+/// accepted `serve` connection. Conservative: long enough to never fire on a
+/// live, merely-quiet MCP/hook connection, short enough that a dead peer's
+/// fd is reclaimed in minutes rather than the OS default of ~2 hours (#792).
+pub const DEFAULT_TCP_KEEPALIVE_SECS: u64 = 60;
+
 /// Default base URL used by thin-client CLI subcommands.
 pub const DEFAULT_SERVER_URL: &str = "http://127.0.0.1:49374";
 
@@ -249,6 +255,14 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// HTTP bind address used by `ai-memory serve`.
     pub bind: String,
+    /// Idle-time (seconds) before the OS starts probing an accepted `serve`
+    /// connection with TCP keepalive. `0` disables keepalive entirely. A
+    /// hook client's peer can die without sending FIN (laptop sleep, a
+    /// VPN/Tailscale flap, an abrupt kill); without keepalive the socket
+    /// stays `ESTABLISHED` forever and leaks one fd per dead peer until
+    /// `accept()` fails with `EMFILE` and the healthcheck breaks (#792). Set
+    /// with `AI_MEMORY_TCP_KEEPALIVE_SECS`.
+    pub tcp_keepalive_secs: u64,
     /// Base URL used by thin-client CLI commands to contact the running server.
     pub server_url: String,
     /// URL subpath the server is mounted under (e.g. `/wiki`). Thin-client
@@ -835,6 +849,7 @@ impl Default for Config {
         Self {
             data_dir: default_data_dir(),
             bind: DEFAULT_BIND.into(),
+            tcp_keepalive_secs: DEFAULT_TCP_KEEPALIVE_SECS,
             server_url: DEFAULT_SERVER_URL.into(),
             base_path: String::new(),
             home_dir: None,
@@ -2424,6 +2439,7 @@ mod tests {
         let cfg = Config::default();
         assert!(cfg.data_dir.ends_with("ai-memory"));
         assert_eq!(cfg.bind, DEFAULT_BIND);
+        assert_eq!(cfg.tcp_keepalive_secs, DEFAULT_TCP_KEEPALIVE_SECS);
         assert_eq!(cfg.server_url, DEFAULT_SERVER_URL);
         assert_eq!(cfg.log_level, "info");
         assert_eq!(

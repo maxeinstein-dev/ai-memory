@@ -1960,11 +1960,49 @@ impl AiMemoryServer {
         )
     }
 
+    /// Diagnostic fields for an EMPTY inbox read whose scope was *inferred*
+    /// (not named by the caller, not bound to the caller's hook session).
+    ///
+    /// An inferred scope can be the wrong inbox: two same-operator agents with
+    /// no session id share one active-project slot, so a no-scope
+    /// `memory_message_pop` / `memory_message_list` can resolve a *different*
+    /// project than the on-start notice / `memory_briefing` counted — the exact
+    /// dead-end where "you have mail" is followed by an empty fetch. Naming the
+    /// resolved scope and how it was inferred turns that silent empty into an
+    /// actionable "re-run with explicit workspace + project". Merged into the
+    /// response only when the read came back empty AND the scope was inferred.
+    async fn inferred_scope_hint(
+        &self,
+        ws: ai_memory_core::WorkspaceId,
+        proj: ai_memory_core::ProjectId,
+        source: ai_memory_store::ScopeSource,
+    ) -> serde_json::Map<String, serde_json::Value> {
+        let (ws_name, proj_name) = self.scope_names(ws, proj).await;
+        let hint = format!(
+            "This inbox ({ws_name}/{proj_name}) was resolved by {source} scope, not \
+             named explicitly, so it may not be the inbox you meant. A SessionStart \
+             notice or memory_briefing count is for the project it named; if you \
+             expected mail here, re-run with explicit workspace and project.",
+            source = source.as_str(),
+        );
+        let mut fields = serde_json::Map::new();
+        fields.insert(
+            "resolved_scope".to_owned(),
+            serde_json::json!({ "workspace": ws_name, "project": proj_name }),
+        );
+        fields.insert(
+            "scope_source".to_owned(),
+            serde_json::Value::String(source.as_str().to_owned()),
+        );
+        fields.insert("hint".to_owned(), serde_json::Value::String(hint));
+        fields
+    }
+
     async fn embed_query(&self, query: &str) -> Option<Vec<f32>> {
         let Some(embedder) = &self.embedder else {
             return None;
         };
-        match embedder.embed(query).await {
+        match embedder.embed_query(query).await {
             Ok(qv) => Some(qv),
             Err(e) => {
                 tracing::warn!(
@@ -3179,13 +3217,38 @@ impl AiMemoryServer {
                 .consolidate_session_multi(session_id, dry, actor, author_id, instructions)
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            if !dry {
+                self.reconcile_consolidation_job(session_id).await;
+            }
             ok_json(&serde_json::json!({ "outcomes": outcomes }))
         } else {
             let outcome = consolidator
                 .consolidate_session(session_id, dry, actor, author_id, instructions)
                 .await
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            if !dry {
+                self.reconcile_consolidation_job(session_id).await;
+            }
             ok_json(&outcome)
+        }
+    }
+
+    /// Reconcile the durable SessionEnd job row after a successful manual
+    /// `memory_consolidate` so the operator does not see a `failed` job for a
+    /// session that is now consolidated. The automatic worker owns the job's
+    /// lease, so the reconcile never touches a `running` row; a best-effort
+    /// failure here must not fail the consolidate that already wrote the page.
+    async fn reconcile_consolidation_job(&self, session_id: SessionId) {
+        if let Err(error) = self
+            .writer
+            .reconcile_session_consolidation_completed(session_id)
+            .await
+        {
+            tracing::warn!(
+                %session_id,
+                %error,
+                "failed to reconcile session consolidation job after manual consolidate"
+            );
         }
     }
 
@@ -4524,8 +4587,8 @@ impl AiMemoryServer {
         OptionalParts(parts): OptionalParts,
     ) -> Result<CallToolResult, McpError> {
         let aps_actor = Self::actor_key_from_parts(Some(&parts));
-        let (ws, proj) = self
-            .effective_ids_for_read_args_with_actor(
+        let ((ws, proj), scope_source) = self
+            .traced_ids_for_read_args(
                 args.workspace.as_deref(),
                 args.project.as_deref(),
                 &aps_actor,
@@ -4552,7 +4615,19 @@ impl AiMemoryServer {
             .list_messages(ws, proj, mailbox, limit)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        ok_json(&serde_json::json!({ "messages": messages }))
+        let mut obj = serde_json::Map::new();
+        // An empty inbox listing under an inferred scope is the same ambiguity
+        // as an empty pop: the caller may be looking at the wrong project.
+        // Only the inbox side can be mis-resolved this way (the outbox is the
+        // caller's own sent mail).
+        if messages.is_empty()
+            && matches!(mailbox, ai_memory_core::MessageBox::Inbox)
+            && scope_source.is_inferred()
+        {
+            obj.extend(self.inferred_scope_hint(ws, proj, scope_source).await);
+        }
+        obj.insert("messages".to_owned(), serde_json::json!(messages));
+        ok_json(&serde_json::Value::Object(obj))
     }
 
     /// Pop (claim exactly once) the next inbox message.
@@ -4575,8 +4650,8 @@ impl AiMemoryServer {
         OptionalParts(parts): OptionalParts,
     ) -> Result<CallToolResult, McpError> {
         let aps_actor = Self::actor_key_from_parts(Some(&parts));
-        let (ws, proj) = self
-            .effective_ids_for_read_args_with_actor(
+        let ((ws, proj), scope_source) = self
+            .traced_ids_for_read_args(
                 args.workspace.as_deref(),
                 args.project.as_deref(),
                 &aps_actor,
@@ -4610,7 +4685,20 @@ impl AiMemoryServer {
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         match popped {
-            None => ok_json(&serde_json::json!({ "message": null })),
+            None => {
+                // A no-scope pop that resolves the shared active-project slot
+                // can land on a different (empty) inbox than the on-start
+                // notice counted — a silent dead-end. When the scope was
+                // inferred, say which inbox was checked and how, so the caller
+                // can re-pop with explicit workspace + project (#847-adjacent
+                // messaging scope divergence).
+                let mut obj = serde_json::Map::new();
+                obj.insert("message".to_owned(), serde_json::Value::Null);
+                if scope_source.is_inferred() {
+                    obj.extend(self.inferred_scope_hint(ws, proj, scope_source).await);
+                }
+                ok_json(&serde_json::Value::Object(obj))
+            }
             Some(message) => {
                 self.notify_operation_observers(admission.as_ref());
                 // Fence the body as untrusted cross-project input, and surface
@@ -7917,6 +8005,111 @@ mod tests {
             )
             .await;
         assert!(bad.is_err());
+    }
+
+    /// Google (and any query/document-asymmetric embedder) sends a different
+    /// task type for search queries than for indexed page bodies. The helper
+    /// that feeds hybrid `memory_query` used the generic `embed()` method,
+    /// which Google implements as `embed_document` (`RETRIEVAL_DOCUMENT`).
+    /// Indexed pages already go through `embed_document`; search text must
+    /// go through `embed_query` (`RETRIEVAL_QUERY`) or the vector stream
+    /// compares a document vector to document vectors.
+    struct QueryTaskEmbedder {
+        embed_calls: std::sync::atomic::AtomicUsize,
+        query_calls: std::sync::atomic::AtomicUsize,
+        document_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Default for QueryTaskEmbedder {
+        fn default() -> Self {
+            Self {
+                embed_calls: std::sync::atomic::AtomicUsize::new(0),
+                query_calls: std::sync::atomic::AtomicUsize::new(0),
+                document_calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Embedder for QueryTaskEmbedder {
+        fn provider(&self) -> &'static str {
+            "google"
+        }
+
+        fn model(&self) -> &str {
+            "gemini-embedding-001"
+        }
+
+        fn dim(&self) -> u32 {
+            2
+        }
+
+        async fn embed(&self, _text: &str) -> ai_memory_llm::LlmResult<Vec<f32>> {
+            self.embed_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![1.0, 0.0])
+        }
+
+        async fn embed_document(&self, _text: &str) -> ai_memory_llm::LlmResult<Vec<f32>> {
+            self.document_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![1.0, 0.0])
+        }
+
+        async fn embed_query(&self, _text: &str) -> ai_memory_llm::LlmResult<Vec<f32>> {
+            self.query_calls
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(vec![0.0, 1.0])
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_query_embeds_search_text_as_a_query_not_a_document() {
+        let (_tmp, _store, server, _ws, _pj) = setup_server().await;
+        let embedder = Arc::new(QueryTaskEmbedder::default());
+        let server = server.with_embedder(embedder.clone());
+        server
+            .memory_query(
+                Parameters(QueryArgs {
+                    query: "karpathy".into(),
+                    limit: Some(5),
+                    project: None,
+                    scopes: Vec::new(),
+                    workspace: None,
+                    global: None,
+                    include_expired: None,
+                    include_superseded: None,
+                    pin_first: None,
+                    explain: None,
+                    as_of: None,
+                    answer: None,
+                    reasoning: None,
+                }),
+                OptionalParts(test_parts_default()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            embedder
+                .query_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "hybrid memory_query must embed the search text with embed_query"
+        );
+        assert_eq!(
+            embedder
+                .embed_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "embed() is the document-side method on Google; using it for search queries mixes task types"
+        );
+        assert_eq!(
+            embedder
+                .document_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "search queries must not take the indexed-document path"
+        );
     }
 
     #[tokio::test]

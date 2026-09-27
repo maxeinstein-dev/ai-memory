@@ -113,6 +113,23 @@ impl ScopeSource {
             ScopeSource::StartupSeed | ScopeSource::DefaultAfterMismatch
         )
     }
+
+    /// True when the scope was inferred from a pointer or default rather than
+    /// stated by the caller ([`ScopeSource::Explicit`]) or bound to the
+    /// caller's own hook session ([`ScopeSource::Session`]).
+    ///
+    /// Broader than [`Self::is_fallback`] on purpose: it also covers
+    /// [`ScopeSource::SharedSlot`] (whichever project published last). Two
+    /// same-operator agents with no session id share that one slot, so a
+    /// no-scope read can resolve to a *different* project than the caller
+    /// meant — the empty-pop dead-end where the on-start inbox notice counted
+    /// one project's mail but a later no-scope `memory_message_pop` resolved
+    /// another project's (empty) inbox and returned nothing. A surface that
+    /// answers from an inferred scope should say so when the answer is empty.
+    #[must_use]
+    pub fn is_inferred(self) -> bool {
+        !matches!(self, ScopeSource::Explicit | ScopeSource::Session)
+    }
 }
 
 impl fmt::Display for ScopeSource {
