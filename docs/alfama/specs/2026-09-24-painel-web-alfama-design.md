@@ -141,9 +141,21 @@ colidirem com o modelo de entrega em fases (§6).
   mesmo PR.
 - **PR por fase, merge pelo dono.** Diferente do mantenedor original (que comita direto no tronco em
   parte dos casos), no fork nenhum PR entra sem revisão e merge explícitos do dono — nunca commit direto
-  em `alfama/main`.
-- **Sincronizar com o original:** a cada release do original, rebase de `alfama/main` sobre a nova tag +
-  gate completo (já descrito em §6).
+  em `alfama/main`. A única exceção é a sincronização com um release do original, no item abaixo.
+- **Sincronizar com o original** (decisão do dono em 2026-09-27, trocando o rebase anterior):
+  1. O `main` do fork espelha a **última tag sincronizada** do original, avançada por fast-forward
+     (`git push origin "vX.Y.Z^{commit}:refs/heads/main"`). Não é uma cópia solta do `main` do original,
+     que edita seções já lançadas depois da tag.
+  2. Numa branch `alfama/sync-X.Y.Z` a partir da `alfama/main`, **merge** da tag, e não rebase, porque a
+     `alfama/main` é publicada. Nos conflitos, prevalece o que o original corrigiu; do fork fica só o que é
+     exclusivo dele.
+  3. Gate completo local, imagem nova e verificação no servidor. Um PR pode ser aberto para rodar o CI dos
+     outros jobs e para registro.
+  4. O merge vai **direto para a `alfama/main`** (fast-forward), como o commit de release do mantenedor
+     original. Motivo: o job "released sections stay frozen" compara com a base do PR. Numa sincronização,
+     os links do rodapé do CHANGELOG sempre mudam, então um PR para a `alfama/main` sempre falha. No push,
+     o job compara com a branch padrão, o `main` = a tag, e passa legitimamente. Os PRs normais continuam
+     comparando com a `alfama/main`.
 
 ## 3. As quatro telas
 
