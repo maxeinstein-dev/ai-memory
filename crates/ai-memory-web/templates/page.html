@@ -69,5 +69,77 @@
   ">
     {{ body_html|safe }}
   </div>
+
+  {% if handoff_status == "enviado" %}
+  <div class="mt-6 rounded border border-green-200 dark:border-green-800 bg-green-50 dark:bg-green-950 px-4 py-3 text-sm text-green-800 dark:text-green-300">
+    Handoff enviado.
+  </div>
+  {% else if handoff_status == "erro" %}
+  <div class="mt-6 rounded border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-950 px-4 py-3 text-sm text-red-800 dark:text-red-300">
+    Não foi possível enviar o handoff{% if handoff_motivo != "" %} ({{ handoff_motivo }}){% endif %}.
+  </div>
+  {% endif %}
+
+  <details class="mt-8 rounded border border-slate-200 dark:border-slate-700">
+    <summary class="cursor-pointer select-none px-4 py-2 text-sm font-medium text-slate-700 dark:text-slate-300">
+      Enviar como handoff
+    </summary>
+    <form method="post" action="handoff" class="px-4 py-4 space-y-3 border-t border-slate-200 dark:border-slate-700">
+      <input type="hidden" name="from_workspace" value="{{ workspace }}">
+      <input type="hidden" name="from_project" value="{{ project }}">
+      <input type="hidden" name="from_path" value="{{ path }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+      <p class="text-xs text-amber-700 dark:text-amber-400">
+        Isto grava um handoff de verdade — a próxima sessão do projeto de destino recebe este conteúdo automaticamente.
+      </p>
+
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <label class="block text-sm">
+          <span class="block text-slate-600 dark:text-slate-400 mb-1">Workspace de destino</span>
+          <input type="text" name="to_workspace" value="{{ workspace }}" required
+            class="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-sm">
+        </label>
+        <label class="block text-sm">
+          <span class="block text-slate-600 dark:text-slate-400 mb-1">Projeto de destino</span>
+          <input type="text" name="to_project" list="known-projects-list" required
+            class="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-sm">
+          <datalist id="known-projects-list">
+            {% for p in known_projects %}
+            <option value="{{ p }}">
+            {% endfor %}
+          </datalist>
+        </label>
+      </div>
+
+      <label class="block text-sm">
+        <span class="block text-slate-600 dark:text-slate-400 mb-1">Resumo</span>
+        <textarea name="summary" required rows="3"
+          class="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-sm"></textarea>
+      </label>
+
+      <label class="block text-sm">
+        <span class="block text-slate-600 dark:text-slate-400 mb-1">Próximos passos (um por linha)</span>
+        <textarea name="next_steps" rows="3"
+          class="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-sm"></textarea>
+      </label>
+
+      <label class="block text-sm">
+        <span class="block text-slate-600 dark:text-slate-400 mb-1">Perguntas em aberto (uma por linha)</span>
+        <textarea name="open_questions" rows="3"
+          class="w-full rounded border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-2 py-1 text-sm"></textarea>
+      </label>
+
+      <label class="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-400">
+        <input type="checkbox" name="shared" checked>
+        Compartilhado (visível para qualquer sessão do projeto de destino)
+      </label>
+
+      <button type="submit"
+        class="rounded bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-3 py-1.5">
+        Enviar como handoff
+      </button>
+    </form>
+  </details>
 </article>
 {% endblock %}

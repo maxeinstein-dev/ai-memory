@@ -3,6 +3,12 @@
 use std::collections::BTreeSet;
 
 use ai_memory_core::{Observation, ObservationKind};
+// Re-exported so existing `projection::cap_text_with_marker` call sites
+// (this module and `ai-memory-mcp`) keep working unchanged. The
+// implementation moved to `ai-memory-core` so the web panel's `POST
+// /handoff` route — which does not depend on this crate — can share it too;
+// see `docs/alfama/plans/2026-09-28-handoff-pela-tela.md` Tarefa 1.
+pub use ai_memory_core::cap_text_with_marker;
 
 const DEFAULT_EVEN_SAMPLE_BUCKETS: usize = 16;
 const MAX_RENDERED_TITLE_CHARS: usize = 500;
@@ -65,18 +71,6 @@ pub struct ProjectedObservations {
     pub selected_indices: Vec<usize>,
     /// Non-fatal budget and truncation notes.
     pub warnings: Vec<String>,
-}
-
-/// Cap one user-visible string with a visible marker.
-#[must_use]
-pub fn cap_text_with_marker(input: &str, max_chars: usize, label: &str) -> String {
-    if input.chars().count() <= max_chars {
-        return input.to_string();
-    }
-    let mut out: String = input.chars().take(max_chars).collect();
-    let omitted = input.chars().count().saturating_sub(max_chars);
-    out.push_str(&format!("\n[{label} truncated; {omitted} chars omitted]"));
-    out
 }
 
 /// Project raw observations into deterministic, budgeted prompt text without

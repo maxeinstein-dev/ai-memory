@@ -89,6 +89,27 @@ router protegido; nenhuma escrita fora do `WriterHandle`; nenhum texto novo arma
 nenhuma dependência nova; `|safe` só em saída de `markdown::render`; handoffs com `OwnerFilter`; CI (gitleaks,
 deny, audit) verde.
 
+**Exceção nomeada, só para `POST /handoff` (2026-09-28, revisada após auditoria de segurança dedicada em
+2026-09-28):** essa é a única rota de escrita do painel — ver
+[`2026-09-28-handoff-pela-tela.md`](2026-09-28-handoff-pela-tela.md). Ela quebra literalmente o item "rotas
+novas só GET" acima, e por isso ganha defesas que nenhuma outra rota do painel precisa: um token CSRF HMAC
+(`crate::csrf` em `ai-memory-web`, assinado sobre campos com tamanho prefixado — não separados por byte —
+para não colidir quando um campo contém o próprio separador), verificado antes de qualquer outra coisa, mais
+a checagem de `Origin` contra o `Host` da própria requisição, mais `X-Frame-Options: DENY` e
+`Content-Security-Policy: frame-ancestors 'none'` em **todo** o router `/web` (não só nesta rota) contra
+clickjacking. Um `to_workspace`/`to_project` em branco é recusado explicitamente (`HandoffError::
+BlankDestination`) em vez de cair silenciosamente no escopo de origem — o atributo `required` do formulário
+é só client-side. Tudo o mais do checklist continua valendo sem exceção para essa rota: escreve só pelo
+`WriterHandle` (via `ScopeResolver::resolve_write_args` + `WriterHandle::insert_handoff`, iguais ao
+`memory_handoff_begin` do MCP), sanitiza o texto livre com a mesma `sanitize_handoff_text_fields` que o MCP
+usa (não uma cópia), não adiciona dependência nova (a chave CSRF usa `getrandom`/`sha2`/`subtle`, já
+dependências do workspace; os cabeçalhos anti-clickjacking usam `tower-http::set_header`, já dependência do
+workspace, só habilitando a feature), não usa `|safe` fora de `markdown::render`, e respeita admissão
+(`AdmissionOp::HandoffBegin`) como qualquer outro caminho de handoff. **Limitação conhecida:** só funciona
+sem autenticação humana/bearer no `/web` — com `dual-auth`/bearer configurado, falha fechado (403/401),
+seguro mas não funcional; ver a spec da rota para o detalhe. Nenhuma outra rota do painel ganha essa
+exceção — ela permanece só leitura.
+
 **Nunca verificar pelo `GET /handoff`:** ele **consome** o handoff pendente (`fetch_and_accept_handoff`,
 uso único). Em 2026-09-25 uma verificação por esse endpoint consumiu o handoff de outra sessão, que precisou
 ser recriado. A paridade prévia = hook é garantida pela função compartilhada (`build_session_brief`) e pelo

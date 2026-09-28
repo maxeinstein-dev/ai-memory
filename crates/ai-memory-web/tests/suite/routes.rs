@@ -5052,3 +5052,826 @@ async fn entre_projetos_escapa_conteudo_malicioso() {
         "regra, handoff e mensagem devem aparecer escapados pelo askama: {text}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// POST /handoff — the panel's first write route (Tarefa 3). See
+// docs/alfama/specs/2026-09-28-handoff-pela-tela.md §5 for the adversarial
+// matrix these tests implement.
+// ---------------------------------------------------------------------------
+
+/// Fixed key so the suite can precompute tokens deterministically instead of
+/// scraping a rendered `page.html` for one — see
+/// `ai_memory_web::router_with_csrf_key_for_test`.
+const HANDOFF_TEST_KEY: [u8; 32] = [7u8; 32];
+
+/// `origem`/`destino` scaffold every `POST /handoff` test starts from.
+async fn handoff_setup() -> (
+    TempDir,
+    Store,
+    Wiki,
+    ai_memory_core::WorkspaceId,
+    ai_memory_core::ProjectId,
+) {
+    let (tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "origem", None)
+        .await
+        .unwrap();
+    (tmp, store, wiki, ws, proj)
+}
+
+/// Minimal `application/x-www-form-urlencoded` percent-encoder — good enough
+/// for the plain ASCII field values these tests use (no reserved bytes
+/// beyond space/newline, which the tests exercise directly).
+fn form_urlencode(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char);
+            }
+            b' ' => out.push('+'),
+            _ => {
+                use std::fmt::Write as _;
+                let _ = write!(&mut out, "%{byte:02X}");
+            }
+        }
+    }
+    out
+}
+
+fn handoff_form_body(fields: &[(&str, &str)]) -> String {
+    fields
+        .iter()
+        .map(|(k, v)| format!("{k}={}", form_urlencode(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn post_handoff_request(body: String, origin: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method(Method::POST)
+        .uri("/handoff")
+        .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded");
+    if let Some(origin) = origin {
+        builder = builder.header(header::ORIGIN, origin);
+    }
+    builder.body(Body::from(body)).unwrap()
+}
+
+/// Like [`post_handoff_request`], but also sets a real `Host` header. The
+/// Origin-vs-Host check in `handoff_web.rs` compares `Origin` against
+/// *this request's own* `Host` — with no `Host` header at all (as
+/// `post_handoff_request` alone sends), `origin_matches_host` compares
+/// against an empty string, so a mismatched-origin test built on it would
+/// pass for the wrong reason (anything mismatches ""). Use this whenever the
+/// test is specifically about the Origin/Host comparison.
+fn post_handoff_request_with_host(body: String, host: &str, origin: Option<&str>) -> Request<Body> {
+    let mut req = post_handoff_request(body, origin);
+    req.headers_mut()
+        .insert(header::HOST, header::HeaderValue::from_str(host).unwrap());
+    req
+}
+
+/// Default happy-path field set: a real, current token for
+/// `(default, origem, notes/handoff-source.md)`.
+fn valid_handoff_fields(csrf_token: &str) -> Vec<(&'static str, String)> {
+    vec![
+        ("from_workspace", "default".to_string()),
+        ("from_project", "origem".to_string()),
+        ("from_path", "notes/handoff-source.md".to_string()),
+        ("csrf_token", csrf_token.to_string()),
+        ("to_workspace", "default".to_string()),
+        ("to_project", "destino".to_string()),
+        ("summary", "resumo de teste".to_string()),
+        ("next_steps", "passo um\npasso dois".to_string()),
+        ("open_questions", "pergunta um".to_string()),
+        ("shared", "on".to_string()),
+    ]
+}
+
+fn as_str_pairs<'a>(fields: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    fields.iter().map(|(k, v)| (*k, v.as_str())).collect()
+}
+
+async fn open_handoffs(
+    store: &Store,
+    ws: ai_memory_core::WorkspaceId,
+    proj: ai_memory_core::ProjectId,
+) -> Vec<ai_memory_core::Handoff> {
+    store
+        .reader
+        .list_handoffs(
+            ws,
+            proj,
+            Some(ai_memory_core::HandoffState::Open),
+            ai_memory_core::OwnerFilter::Any,
+            50,
+        )
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn handoff_post_without_csrf_token_returns_403_and_writes_nothing() {
+    let (_tmp, store, wiki, _ws, _proj) = handoff_setup().await;
+    let to_ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let to_proj = store
+        .writer
+        .get_or_create_project(to_ws, "destino", None)
+        .await
+        .unwrap();
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+
+    let mut fields = valid_handoff_fields("");
+    fields.retain(|(k, _)| *k != "csrf_token");
+    let body = handoff_form_body(&as_str_pairs(&fields));
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(open_handoffs(&store, to_ws, to_proj).await.is_empty());
+}
+
+#[tokio::test]
+async fn handoff_post_with_token_from_another_page_returns_403_and_writes_nothing() {
+    let (_tmp, store, wiki, _ws, _proj) = handoff_setup().await;
+    let to_ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let to_proj = store
+        .writer
+        .get_or_create_project(to_ws, "destino", None)
+        .await
+        .unwrap();
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+
+    let now = ai_memory_web::now_unix_minute_for_test();
+    // Token genuinely valid, but signed for a DIFFERENT from_path.
+    let wrong_page_token = ai_memory_web::csrf_token_for_test(
+        HANDOFF_TEST_KEY,
+        "default",
+        "origem",
+        "notes/some-other-page.md",
+        now,
+    );
+    let fields = valid_handoff_fields(&wrong_page_token);
+    let body = handoff_form_body(&as_str_pairs(&fields));
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(open_handoffs(&store, to_ws, to_proj).await.is_empty());
+}
+
+/// Route-level counterpart of `token_signed_for_a_different_workspace_or_
+/// project_does_not_verify` in `csrf.rs` — that one is a unit test of
+/// `csrf::verify` in isolation; this one proves the same thing through the
+/// real HTTP handler: a token genuinely valid for `(default, origem, P)`
+/// does not verify when the POST body itself claims `from_project=decoy`.
+#[tokio::test]
+async fn handoff_post_with_forged_from_project_in_body_returns_403_and_writes_nothing() {
+    let (_tmp, store, wiki, ws, _proj) = handoff_setup().await;
+    store
+        .writer
+        .get_or_create_project(ws, "decoy", None)
+        .await
+        .unwrap();
+    let to_ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let to_proj = store
+        .writer
+        .get_or_create_project(to_ws, "destino", None)
+        .await
+        .unwrap();
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+
+    let now = ai_memory_web::now_unix_minute_for_test();
+    // Token genuinely valid for the real page's from_project ("origem").
+    let real_token = ai_memory_web::csrf_token_for_test(
+        HANDOFF_TEST_KEY,
+        "default",
+        "origem",
+        "notes/handoff-source.md",
+        now,
+    );
+    let mut fields = valid_handoff_fields(&real_token);
+    for (k, v) in fields.iter_mut() {
+        if *k == "from_project" {
+            *v = "decoy".to_string();
+        }
+    }
+    let body = handoff_form_body(&as_str_pairs(&fields));
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(open_handoffs(&store, to_ws, to_proj).await.is_empty());
+}
+
+#[tokio::test]
+async fn handoff_post_with_expired_token_returns_403_and_writes_nothing() {
+    let (_tmp, store, wiki, _ws, _proj) = handoff_setup().await;
+    let to_ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let to_proj = store
+        .writer
+        .get_or_create_project(to_ws, "destino", None)
+        .await
+        .unwrap();
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+
+    let now = ai_memory_web::now_unix_minute_for_test();
+    // 5 minutes old — outside the ~2 minute (current + previous) tolerance.
+    let old_token = ai_memory_web::csrf_token_for_test(
+        HANDOFF_TEST_KEY,
+        "default",
+        "origem",
+        "notes/handoff-source.md",
+        now - 5,
+    );
+    let fields = valid_handoff_fields(&old_token);
+    let body = handoff_form_body(&as_str_pairs(&fields));
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(open_handoffs(&store, to_ws, to_proj).await.is_empty());
+}
+
+#[tokio::test]
+async fn handoff_post_with_mismatched_origin_returns_403_and_writes_nothing() {
+    // A real Host (what the request itself carries, matching what the
+    // outer Host allowlist would have accepted) so the mismatch is proven
+    // against a genuine value, not against an absent/empty Host header
+    // (which would mismatch any Origin for the wrong reason — see
+    // `post_handoff_request_with_host`'s docs).
+    for origin in ["https://evil.example", "null", "http://127.0.0.1:8080"] {
+        let (_tmp, store, wiki, _ws, _proj) = handoff_setup().await;
+        let to_ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let to_proj = store
+            .writer
+            .get_or_create_project(to_ws, "destino", None)
+            .await
+            .unwrap();
+        let app = ai_memory_web::router_with_csrf_key_for_test(
+            store.reader.clone(),
+            wiki.clone(),
+            HANDOFF_TEST_KEY,
+        );
+
+        let now = ai_memory_web::now_unix_minute_for_test();
+        let token = ai_memory_web::csrf_token_for_test(
+            HANDOFF_TEST_KEY,
+            "default",
+            "origem",
+            "notes/handoff-source.md",
+            now,
+        );
+        let fields = valid_handoff_fields(&token);
+        let body = handoff_form_body(&as_str_pairs(&fields));
+        let resp = app
+            .oneshot(post_handoff_request_with_host(
+                body,
+                "127.0.0.1:49374",
+                Some(origin),
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::FORBIDDEN,
+            "Origin {origin:?} must be rejected against Host 127.0.0.1:49374"
+        );
+        assert!(open_handoffs(&store, to_ws, to_proj).await.is_empty());
+    }
+}
+
+/// Control: valid token, no `Origin` header (same-origin form submits with
+/// no `Origin` in some browsers/clients) — must write and redirect.
+#[tokio::test]
+async fn handoff_post_with_valid_token_creates_handoff_and_redirects() {
+    let (_tmp, store, wiki, _ws, _proj) = handoff_setup().await;
+    let to_ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let to_proj = store
+        .writer
+        .get_or_create_project(to_ws, "destino", None)
+        .await
+        .unwrap();
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+
+    let now = ai_memory_web::now_unix_minute_for_test();
+    let token = ai_memory_web::csrf_token_for_test(
+        HANDOFF_TEST_KEY,
+        "default",
+        "origem",
+        "notes/handoff-source.md",
+        now,
+    );
+    let fields = valid_handoff_fields(&token);
+    let body = handoff_form_body(&as_str_pairs(&fields));
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        location.contains("handoff=enviado"),
+        "expected a success notice in the redirect target: {location}"
+    );
+
+    let handoffs = open_handoffs(&store, to_ws, to_proj).await;
+    assert_eq!(handoffs.len(), 1, "expected exactly one handoff written");
+    let h = &handoffs[0];
+    assert_eq!(h.content.summary, "resumo de teste");
+    assert!(
+        h.content
+            .next_steps
+            .first()
+            .is_some_and(|first| first.contains("notes/handoff-source.md")),
+        "expected the origin page's link as the first next_steps entry: {:?}",
+        h.content.next_steps
+    );
+}
+
+/// Control's counterpart: a genuinely valid `Origin` (same host the request
+/// itself carries) must not be rejected.
+#[tokio::test]
+async fn handoff_post_with_matching_origin_and_host_creates_handoff() {
+    let (_tmp, store, wiki, _ws, _proj) = handoff_setup().await;
+    store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+
+    let now = ai_memory_web::now_unix_minute_for_test();
+    let token = ai_memory_web::csrf_token_for_test(
+        HANDOFF_TEST_KEY,
+        "default",
+        "origem",
+        "notes/handoff-source.md",
+        now,
+    );
+    let fields = valid_handoff_fields(&token);
+    let body = handoff_form_body(&as_str_pairs(&fields));
+    let mut req = post_handoff_request(body, Some("http://127.0.0.1:49374"));
+    req.headers_mut().insert(
+        header::HOST,
+        header::HeaderValue::from_static("127.0.0.1:49374"),
+    );
+    let resp = app.oneshot(req).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+}
+
+/// The spec's independent scope-binding case: `from_workspace`/`from_project`
+/// forged in the body must never influence which project the handoff lands
+/// in — only `to_workspace`/`to_project` do. Bypasses the CSRF/Origin gate
+/// entirely (calls the route's own scope+write logic directly), per the
+/// plan: this must hold on its own, independent of the CSRF tests above.
+#[tokio::test]
+async fn handoff_forged_from_fields_do_not_change_the_destination_scope() {
+    let (_tmp, store, wiki, ws, _origem_proj) = handoff_setup().await;
+    // A second, unrelated project the forged `from_project` claims to be —
+    // if it leaked into scope resolution, the handoff would land here.
+    let decoy_proj = store
+        .writer
+        .get_or_create_project(ws, "decoy", None)
+        .await
+        .unwrap();
+    let to_proj = store
+        .writer
+        .get_or_create_project(ws, "destino-real", None)
+        .await
+        .unwrap();
+
+    let outcome = ai_memory_web::create_handoff_for_test(
+        &store.reader,
+        &wiki,
+        "default",
+        "decoy",
+        "notes/whatever.md",
+        "default",
+        "destino-real",
+        "resumo forjado",
+    )
+    .await;
+    assert!(
+        outcome.is_ok(),
+        "expected the write to succeed: {outcome:?}"
+    );
+
+    assert!(
+        open_handoffs(&store, ws, decoy_proj).await.is_empty(),
+        "a forged from_project must not receive the handoff"
+    );
+    assert_eq!(open_handoffs(&store, ws, to_proj).await.len(), 1);
+}
+
+/// A raw POST can blank `to_workspace`/`to_project` even though the HTML
+/// form's `required` attribute would stop a real browser — `required` is
+/// client-side only. Must be rejected outright, never silently fall back to
+/// the origin page's own scope (`HandoffError::BlankDestination`).
+#[tokio::test]
+async fn handoff_post_with_blank_destination_is_rejected_and_writes_nothing() {
+    let (_tmp, store, wiki, ws, proj) = handoff_setup().await;
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+
+    let now = ai_memory_web::now_unix_minute_for_test();
+    let token = ai_memory_web::csrf_token_for_test(
+        HANDOFF_TEST_KEY,
+        "default",
+        "origem",
+        "notes/handoff-source.md",
+        now,
+    );
+    let mut fields = valid_handoff_fields(&token);
+    for (k, v) in fields.iter_mut() {
+        if *k == "to_workspace" || *k == "to_project" {
+            *v = String::new();
+        }
+    }
+    let body = handoff_form_body(&as_str_pairs(&fields));
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+
+    // Not a CSRF failure — the token was genuinely valid, so this redirects
+    // with an error notice rather than a bare 403.
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let location = resp
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        location.contains("motivo=destino_vazio"),
+        "expected the blank-destination reason in the redirect: {location}"
+    );
+    // Must NOT have silently fallen back to writing into the origin
+    // project's own scope.
+    assert!(open_handoffs(&store, ws, proj).await.is_empty());
+}
+
+#[tokio::test]
+async fn handoff_post_creates_missing_destination_project() {
+    let (_tmp, store, wiki, ws, _proj) = handoff_setup().await;
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+    assert!(
+        store
+            .reader
+            .find_project(ws, "destino".to_string())
+            .await
+            .unwrap()
+            .is_none(),
+        "destination must not exist yet"
+    );
+
+    let now = ai_memory_web::now_unix_minute_for_test();
+    let token = ai_memory_web::csrf_token_for_test(
+        HANDOFF_TEST_KEY,
+        "default",
+        "origem",
+        "notes/handoff-source.md",
+        now,
+    );
+    let body = handoff_form_body(&as_str_pairs(&valid_handoff_fields(&token)));
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let to_proj = store
+        .reader
+        .find_project(ws, "destino".to_string())
+        .await
+        .unwrap()
+        .expect("destination project must now exist");
+    assert_eq!(open_handoffs(&store, ws, to_proj).await.len(), 1);
+}
+
+#[tokio::test]
+async fn handoff_post_to_existing_destination_project_does_not_duplicate_it() {
+    let (_tmp, store, wiki, ws, _proj) = handoff_setup().await;
+    let to_proj = store
+        .writer
+        .get_or_create_project(ws, "destino", None)
+        .await
+        .unwrap();
+
+    for _ in 0..2 {
+        let app = ai_memory_web::router_with_csrf_key_for_test(
+            store.reader.clone(),
+            wiki.clone(),
+            HANDOFF_TEST_KEY,
+        );
+        let now = ai_memory_web::now_unix_minute_for_test();
+        let token = ai_memory_web::csrf_token_for_test(
+            HANDOFF_TEST_KEY,
+            "default",
+            "origem",
+            "notes/handoff-source.md",
+            now,
+        );
+        let body = handoff_form_body(&as_str_pairs(&valid_handoff_fields(&token)));
+        let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    }
+
+    let again = store
+        .reader
+        .find_project(ws, "destino".to_string())
+        .await
+        .unwrap()
+        .expect("destination project must exist");
+    assert_eq!(again, to_proj, "destination project must not be duplicated");
+    assert_eq!(
+        open_handoffs(&store, ws, to_proj).await.len(),
+        2,
+        "two separate handoffs, one project"
+    );
+}
+
+/// Same proof the MCP tool already has for `memory_handoff_begin`: a secret
+/// pattern in the summary is scrubbed before it reaches storage, because
+/// both call the same `ai_memory_core::sanitize_handoff_text_fields`.
+#[tokio::test]
+async fn handoff_post_scrubs_a_recognised_secret_from_the_summary() {
+    let (_tmp, store, wiki, ws, _proj) = handoff_setup().await;
+    let to_proj = store
+        .writer
+        .get_or_create_project(ws, "destino", None)
+        .await
+        .unwrap();
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+
+    let now = ai_memory_web::now_unix_minute_for_test();
+    let token = ai_memory_web::csrf_token_for_test(
+        HANDOFF_TEST_KEY,
+        "default",
+        "origem",
+        "notes/handoff-source.md",
+        now,
+    );
+    let mut fields = valid_handoff_fields(&token);
+    for (k, v) in fields.iter_mut() {
+        if *k == "summary" {
+            *v = "contains sk-testsecret12345678901234567890 before cap".to_string();
+        }
+    }
+    let body = handoff_form_body(&as_str_pairs(&fields));
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+
+    let handoffs = open_handoffs(&store, ws, to_proj).await;
+    assert_eq!(handoffs.len(), 1);
+    assert!(
+        !handoffs[0].content.summary.contains("sk-testsecret"),
+        "secret must be scrubbed: {}",
+        handoffs[0].content.summary
+    );
+}
+
+/// An admission webhook with a refusal policy must refuse
+/// `AdmissionOp::HandoffBegin` here exactly like it refuses
+/// `memory_handoff_begin` over MCP — same chain, same op, same
+/// `Wiki::authorize_operation` call.
+#[tokio::test]
+async fn handoff_post_is_blocked_by_an_admission_refusal() {
+    let refusing = axum::Router::new().route(
+        "/deny",
+        axum::routing::post(|| async { (StatusCode::FORBIDDEN, "no handoffs today") }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, refusing).await.unwrap();
+    });
+    let chain = ai_memory_wiki::AdmissionChain::new(vec![ai_memory_wiki::WebhookConfig {
+        name: "deny-handoffs".into(),
+        url: format!("http://{addr}/deny"),
+        timeout_ms: 2_000,
+        failure_policy: ai_memory_wiki::FailurePolicy::Reject,
+        events: vec![ai_memory_wiki::AdmissionOp::HandoffBegin],
+        blocking: true,
+    }])
+    .unwrap();
+
+    let tmp = TempDir::new().unwrap();
+    let store = Store::open(tmp.path()).unwrap();
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    store
+        .writer
+        .get_or_create_project(ws, "origem", None)
+        .await
+        .unwrap();
+    let to_proj = store
+        .writer
+        .get_or_create_project(ws, "destino", None)
+        .await
+        .unwrap();
+    let wiki = Wiki::new(tmp.path(), store.writer.clone())
+        .unwrap()
+        .with_admission_chain(chain);
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+
+    let now = ai_memory_web::now_unix_minute_for_test();
+    let token = ai_memory_web::csrf_token_for_test(
+        HANDOFF_TEST_KEY,
+        "default",
+        "origem",
+        "notes/handoff-source.md",
+        now,
+    );
+    let body = handoff_form_body(&as_str_pairs(&valid_handoff_fields(&token)));
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+
+    // Admission refusal is NOT a CSRF failure — the route redirects with an
+    // error notice rather than a bare 403 (spec: never a raw error body).
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    assert!(open_handoffs(&store, ws, to_proj).await.is_empty());
+}
+
+/// The page GET renders a real, live token that a genuine POST accepts —
+/// proves `page.html`'s hidden field and `POST /handoff`'s verification
+/// actually agree end to end, not just against hand-built test tokens.
+#[tokio::test]
+async fn handoff_token_rendered_by_the_page_is_accepted_by_the_post_route() {
+    let (_tmp, store, wiki) = setup().await;
+    let ws = store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let proj = store
+        .writer
+        .get_or_create_project(ws, "origem", None)
+        .await
+        .unwrap();
+    // wiki.write_page (not store.writer.upsert_page) so the body actually
+    // lands on disk — the page handler's GET reads it via `wiki.read_page`.
+    wiki.write_page(wiki_req(ws, proj, "notes/foo.md", "# Foo\n\nSome content"))
+        .await
+        .unwrap();
+
+    let app = ai_memory_web::router_with_csrf_key_for_test(
+        store.reader.clone(),
+        wiki.clone(),
+        HANDOFF_TEST_KEY,
+    );
+    let get_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/w/default/origem/p/notes/foo.md")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_resp.status(), StatusCode::OK);
+    let html_bytes = axum::body::to_bytes(get_resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = std::str::from_utf8(&html_bytes).unwrap();
+    let token = extract_hidden_value(html, "csrf_token")
+        .expect("page.html must render a csrf_token hidden field");
+    // The rendered hidden fields, not the generic `valid_handoff_fields`
+    // fixture (which signs a different from_path) — the token above was
+    // issued for exactly this page's own (workspace, project, path).
+    let from_workspace = extract_hidden_value(html, "from_workspace")
+        .expect("page.html must render a from_workspace hidden field");
+    let from_project = extract_hidden_value(html, "from_project")
+        .expect("page.html must render a from_project hidden field");
+    let from_path = extract_hidden_value(html, "from_path")
+        .expect("page.html must render a from_path hidden field");
+    assert_eq!(from_workspace, "default");
+    assert_eq!(from_project, "origem");
+    assert_eq!(from_path, "notes/foo.md");
+
+    let fields: Vec<(&str, &str)> = vec![
+        ("from_workspace", from_workspace.as_str()),
+        ("from_project", from_project.as_str()),
+        ("from_path", from_path.as_str()),
+        ("csrf_token", token.as_str()),
+        ("to_workspace", "default"),
+        ("to_project", "destino"),
+        ("summary", "resumo de teste"),
+    ];
+    let body = handoff_form_body(&fields);
+    let resp = app.oneshot(post_handoff_request(body, None)).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+}
+
+/// Pull `value="..."` out of `<input type="hidden" name="{name}" value="...">`
+/// in rendered HTML. Test-only scraping helper — good enough for the one
+/// field this suite needs to read back.
+fn extract_hidden_value(html: &str, name: &str) -> Option<String> {
+    let needle = format!("name=\"{name}\" value=\"");
+    let start = html.find(&needle)? + needle.len();
+    let end = html[start..].find('"')? + start;
+    Some(html[start..end].to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Clickjacking headers — Should-fix from the CSRF-focused security audit
+// of the handoff route: apply to the whole /web router, not just /handoff.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn every_web_response_carries_anti_clickjacking_headers() {
+    let (_tmp, store, wiki) = setup().await;
+    store
+        .writer
+        .get_or_create_workspace("default")
+        .await
+        .unwrap();
+    let app = router(store.reader.clone(), wiki.clone());
+    let resp = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("x-frame-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("DENY")
+    );
+    assert_eq!(
+        resp.headers()
+            .get(header::CONTENT_SECURITY_POLICY)
+            .and_then(|v| v.to_str().ok()),
+        Some("frame-ancestors 'none'")
+    );
+}

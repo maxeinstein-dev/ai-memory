@@ -52,8 +52,10 @@ pub use actor::{
 };
 pub use error::{MemoryError, MemoryResult};
 pub use handoff::{
-    Handoff, HandoffAcceptance, HandoffContent, HandoffLifecycle, HandoffOrigin, HandoffScope,
-    HandoffState, NewHandoff,
+    HANDOFF_FILE_LIST_MAX_CHARS, HANDOFF_FILE_MAX_CHARS, HANDOFF_ITEM_MAX_CHARS,
+    HANDOFF_LIST_MAX_ITEMS, HANDOFF_SUMMARY_MAX_CHARS, HANDOFF_TEXT_LIST_MAX_CHARS, Handoff,
+    HandoffAcceptance, HandoffContent, HandoffLifecycle, HandoffOrigin, HandoffScope, HandoffState,
+    NewHandoff, cap_handoff_list, cap_text_with_marker, sanitize_handoff_text_fields,
 };
 pub use ids::{
     AgentKind, ApiCredentialId, AutoImproveProposalId, AutoImproveRunId, EntityId, HandoffId,

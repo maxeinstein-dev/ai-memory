@@ -705,6 +705,21 @@ pub(crate) struct PageView {
     /// Optional email rendered as a `mailto:` link after the username.
     /// Empty when not set on the user row.
     pub author_email: String,
+    /// CSRF token for the "Enviar como handoff" form (`crate::csrf::issue`),
+    /// scoped to exactly this page's `(workspace, project, path)`. Embedded
+    /// as a hidden field; never derived from anything the form itself
+    /// carries.
+    pub csrf_token: String,
+    /// Known project names for the handoff destination field's `<datalist>`
+    /// — the same aggregate the home page already lists, no new query.
+    /// Free text is still accepted; this only offers completion.
+    pub known_projects: Vec<String>,
+    /// `?handoff=` from `POST /handoff`'s redirect: `"enviado"`, `"erro"`,
+    /// or empty (no notice). Not security-relevant — only controls the
+    /// banner.
+    pub handoff_status: String,
+    /// `?motivo=` alongside `handoff_status == "erro"`; empty otherwise.
+    pub handoff_motivo: String,
 }
 
 // ---------------------------------------------------------------------------

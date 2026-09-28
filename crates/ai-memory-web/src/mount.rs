@@ -450,7 +450,10 @@ fn mount_builtin_browser(
         Arc::new(base_href.to_string()),
         inject_web_base_href,
     ));
-    info!(mount, base_href, "read-only wiki browser mounted");
+    // "read-only" except for the fork's POST /handoff route — see
+    // crate::routes::handoff_web and docs/alfama/specs/2026-09-28-handoff-
+    // pela-tela.md. Every other route here stays read-only.
+    info!(mount, base_href, "wiki browser mounted");
     if slug.is_empty() {
         return router.merge(web_router);
     }
