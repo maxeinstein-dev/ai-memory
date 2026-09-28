@@ -7,9 +7,13 @@
 //! clone (everything inside is `Arc`-shaped already), so axum's
 //! `State<Arc<WebState>>` extractor stays free of clone-heavy code.
 
+use std::sync::Arc;
+
 use ai_memory_core::Sanitizer;
 use ai_memory_store::{ReaderPool, WriterHandle};
 use ai_memory_wiki::Wiki;
+
+use crate::csrf::CsrfKey;
 
 /// Shared state for every web route. Construct once via
 /// [`crate::router`].
@@ -26,6 +30,11 @@ pub struct WebState {
     /// Privacy strip applied to handoff free-text before it is written,
     /// exactly like every other handoff-creating surface.
     pub sanitizer: Sanitizer,
+    /// Process-lifetime CSRF key for `POST /handoff` (see `crate::csrf`).
+    /// `Arc`-wrapped so every clone of `WebState` shares the exact key
+    /// generated once in [`Self::new`] — regenerating per clone would make
+    /// a token issued by one clone unverifiable by another.
+    pub csrf_key: Arc<CsrfKey>,
 }
 
 impl WebState {
@@ -44,11 +53,18 @@ impl WebState {
     pub fn new(reader: ReaderPool, wiki: Wiki) -> Self {
         let writer = wiki.writer().clone();
         let sanitizer = wiki.sanitizer().clone();
+        // OS RNG failure here is not a recoverable condition for a process
+        // that is about to serve a write route — same posture as the other
+        // `getrandom::fill` call sites in this workspace (auth tokens, user
+        // salts), which propagate the error up to startup rather than
+        // limping on with a predictable key.
+        let csrf_key = Arc::new(CsrfKey::generate().expect("OS RNG must be available at startup"));
         Self {
             reader,
             wiki,
             writer,
             sanitizer,
+            csrf_key,
         }
     }
 }

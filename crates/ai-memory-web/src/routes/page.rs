@@ -4,19 +4,32 @@ use std::sync::Arc;
 
 use ai_memory_core::PagePath;
 use askama::Template;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Response};
+use serde::Deserialize;
 
 use crate::markdown;
 use crate::routes::not_found_response;
 use crate::state::WebState;
 use crate::templates::{NamespaceView, PageRow, PageView, humanize, page_href, project_href};
 
+/// `?handoff=enviado` / `?handoff=erro&motivo=...` set by `POST /handoff`'s
+/// redirect (routes::handoff_web) so this GET can render a one-time notice.
+/// Not itself security-relevant: it only controls which banner is shown,
+/// never who can write.
+#[derive(Debug, Deserialize)]
+pub(crate) struct HandoffNotice {
+    handoff: Option<String>,
+    #[serde(default)]
+    motivo: Option<String>,
+}
+
 /// Handler for `GET /w/:workspace/:project/p/*path`.
 pub(crate) async fn handler(
     State(state): State<Arc<WebState>>,
     Path((workspace, project, path)): Path<(String, String, String)>,
+    Query(notice): Query<HandoffNotice>,
 ) -> Response {
     let meta = match state.reader.page_meta(&workspace, &project, &path).await {
         Ok(Some(m)) => m,
@@ -67,6 +80,32 @@ pub(crate) async fn handler(
         },
     );
 
+    // CSRF token scoped to exactly this page's own (workspace, project,
+    // path) — never anything the "Enviar como handoff" form itself could
+    // supply. Signs `meta.path` (not the raw URL `path` extractor value)
+    // because that is exactly what the hidden `from_path` field below
+    // renders as `PageView.path` — they must be byte-identical or a
+    // legitimately submitted form would fail its own CSRF check. See
+    // crate::csrf and POST /handoff (routes::handoff_web).
+    let csrf_token = crate::csrf::issue(
+        &state.csrf_key,
+        &workspace,
+        &project,
+        &meta.path,
+        crate::csrf::now_unix_minute(),
+    );
+    let known_projects = state
+        .reader
+        .list_projects_with_stats()
+        .await
+        .map(|summaries| {
+            summaries
+                .into_iter()
+                .map(|s| s.project_name)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
     match (PageView {
         workspace,
         project,
@@ -84,6 +123,10 @@ pub(crate) async fn handler(
         author_username,
         author_name,
         author_email,
+        csrf_token,
+        known_projects,
+        handoff_status: notice.handoff.unwrap_or_default(),
+        handoff_motivo: notice.motivo.unwrap_or_default(),
     }
     .render())
     {

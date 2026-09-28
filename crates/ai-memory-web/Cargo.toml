@@ -6,7 +6,7 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Read-only HTTP browser for the ai-memory wiki (project list, tree navigation, markdown rendering, FTS5 search)."
+description = "HTTP browser for the ai-memory wiki (project list, tree navigation, markdown rendering, FTS5 search). Read-only except for the fork's POST /handoff route."
 
 [dependencies]
 ai-memory-core.workspace = true
@@ -21,6 +21,12 @@ tracing.workspace = true
 axum.workspace = true
 jiff.workspace = true
 sha2.workspace = true
+# CSRF key generation (`POST /handoff`) and constant-time token comparison.
+# Both already workspace dependencies used by ai-memory-mcp/ai-memory-store
+# for the same purposes (auth tokens, user salts) — not new to the
+# workspace, just newly declared for this crate.
+getrandom.workspace = true
+subtle.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 
