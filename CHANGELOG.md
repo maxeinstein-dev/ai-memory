@@ -53,6 +53,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   evidence session, never `created_at`/`updated_at` (the date the page was
   generated, not the date of the knowledge). Read-only, GET-only, inside the
   existing protected `/web` router — no new authentication surface. (#7)
+- (fork alfama) A "Enviar como handoff" form on every `/web` page screen
+  (`/web/w/{workspace}/{project}/p/{path}`) sending that page as a
+  cross-project handoff to an existing or new project — the panel's first
+  write route, `POST /web/handoff`. Protected by a stateless HMAC-SHA256
+  CSRF token (process-lifetime key, current-and-previous-minute tolerance,
+  constant-time compare) embedded when the page renders, plus an `Origin`
+  vs. `Host` check; the destination is resolved only from what the operator
+  typed (`to_workspace`/`to_project`), never from the hidden origin fields.
+  Shares the same field sanitization, scope resolution, and admission check
+  (`AdmissionOp::HandoffBegin`) as the MCP `memory_handoff_begin` tool — see
+  `docs/alfama/specs/2026-09-28-handoff-pela-tela.md` and
+  `docs/security-boundaries.md` (row `alfama-5`) for the full design and the
+  adversarial test matrix.
 
 ### Changed
 - (fork alfama) The session-briefing renderer (`render_session_brief` and its

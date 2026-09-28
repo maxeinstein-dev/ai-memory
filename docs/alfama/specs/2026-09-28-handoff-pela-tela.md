@@ -140,6 +140,13 @@ com backup, como as demais telas.
    o link da página de origem no `next_steps`.
 3. Editar o `curl` da mesma requisição sem o `csrf_token` → 403, nada aparece no `memory_handoff_list`.
 
+## Limitação conhecida (auditoria de segurança, 2026-09-28)
+
+Esta rota só funciona quando o `/web` roda sem autenticação humana/bearer (o deployment do próprio fork,
+loopback). Com `dual-auth` ou bearer configurado, o pedido falha fechado (403/401, antes mesmo do handler
+rodar) — seguro, mas hoje não funcional nesses modos. Estender para modos autenticados fica como trabalho
+futuro, não tentado aqui.
+
 ## O que esta spec NÃO decide
 
 - Se o handoff criado pela tela deveria também aparecer, de alguma forma, na tela "Entre projetos" antes
