@@ -11,7 +11,7 @@ use ai_memory_consolidate::{
 };
 use ai_memory_core::{
     ActiveProject, AgentKind, FeedbackKind, HandoffId, HandoffState, NewHandoff, PageId, PagePath,
-    ProjectId, Sanitizer, SessionId, Tier, WorkspaceId,
+    ProjectId, Sanitizer, SessionId, Tier, WorkspaceId, sanitize_handoff_text_fields,
 };
 use ai_memory_llm::{Embedder, LlmProvider};
 use ai_memory_store::{
@@ -33,12 +33,6 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 
-const HANDOFF_SUMMARY_MAX_CHARS: usize = 3_000;
-const HANDOFF_ITEM_MAX_CHARS: usize = 1_500;
-const HANDOFF_FILE_MAX_CHARS: usize = 512;
-const HANDOFF_TEXT_LIST_MAX_CHARS: usize = 6_000;
-const HANDOFF_FILE_LIST_MAX_CHARS: usize = 4_096;
-const HANDOFF_LIST_MAX_ITEMS: usize = 20;
 const OPEN_HANDOFFS_DEFAULT_LIMIT: u32 = 50;
 const OPEN_HANDOFFS_MAX_LIMIT: u32 = 200;
 
@@ -76,83 +70,6 @@ fn default_auto_improve_review_config() -> AutoImproveReviewConfig {
             ai_memory_consolidate::DEFAULT_AUTO_IMPROVE_MAX_PROCEDURE_PAGE_TOKENS,
         eval: ai_memory_consolidate::AutoImproveEvalConfig::default(),
     }
-}
-
-fn cap_handoff_list<I>(
-    items: I,
-    item_max_chars: usize,
-    total_max_chars: usize,
-    item_label: &str,
-    list_label: &str,
-) -> Vec<String>
-where
-    I: IntoIterator<Item = String>,
-{
-    let capped: Vec<String> = items
-        .into_iter()
-        .map(|item| cap_text_with_marker(&item, item_max_chars, item_label))
-        .collect();
-    let total_items = capped.len();
-    let mut out = Vec::new();
-    let mut used_chars = 0usize;
-
-    for (idx, item) in capped.into_iter().enumerate() {
-        if out.len() >= HANDOFF_LIST_MAX_ITEMS {
-            push_handoff_omission_marker(
-                &mut out,
-                &mut used_chars,
-                total_max_chars,
-                list_label,
-                total_items.saturating_sub(idx),
-            );
-            break;
-        }
-        let item_len = item.chars().count();
-        let separator = usize::from(!out.is_empty());
-        if !out.is_empty()
-            && used_chars
-                .saturating_add(separator)
-                .saturating_add(item_len)
-                > total_max_chars
-        {
-            push_handoff_omission_marker(
-                &mut out,
-                &mut used_chars,
-                total_max_chars,
-                list_label,
-                total_items.saturating_sub(idx),
-            );
-            break;
-        }
-        used_chars = used_chars
-            .saturating_add(separator)
-            .saturating_add(item_len);
-        out.push(item);
-    }
-    out
-}
-
-fn push_handoff_omission_marker(
-    out: &mut Vec<String>,
-    used_chars: &mut usize,
-    total_max_chars: usize,
-    label: &str,
-    omitted: usize,
-) {
-    if omitted == 0 {
-        return;
-    }
-    let separator = usize::from(!out.is_empty());
-    let available = total_max_chars.saturating_sub(used_chars.saturating_add(separator));
-    if available == 0 {
-        return;
-    }
-    let marker = format!("[{label} truncated; {omitted} additional item(s) omitted]");
-    let marker: String = marker.chars().take(available).collect();
-    *used_chars = used_chars
-        .saturating_add(separator)
-        .saturating_add(marker.chars().count());
-    out.push(marker);
 }
 
 /// Instructions surfaced to clients via `ServerInfo`. Sent on every
@@ -4171,26 +4088,12 @@ impl AiMemoryServer {
                 &aps_actor,
             )
             .await?;
-        let open_questions = cap_handoff_list(
-            args.open_questions.iter().map(|q| s.scrub(q)),
-            HANDOFF_ITEM_MAX_CHARS,
-            HANDOFF_TEXT_LIST_MAX_CHARS,
-            "handoff item",
-            "handoff open_questions",
-        );
-        let next_steps = cap_handoff_list(
-            args.next_steps.iter().map(|n| s.scrub(n)),
-            HANDOFF_ITEM_MAX_CHARS,
-            HANDOFF_TEXT_LIST_MAX_CHARS,
-            "handoff item",
-            "handoff next_steps",
-        );
-        let files_touched = cap_handoff_list(
-            args.files_touched.iter().map(|f| s.scrub(f)),
-            HANDOFF_FILE_MAX_CHARS,
-            HANDOFF_FILE_LIST_MAX_CHARS,
-            "handoff file",
-            "handoff files_touched",
+        let (summary, open_questions, next_steps, files_touched) = sanitize_handoff_text_fields(
+            s,
+            &args.summary,
+            &args.open_questions,
+            &args.next_steps,
+            &args.files_touched,
         );
         let creator = crate::actor::actor_from_parts(&parts);
         let owner_user = if args.shared.unwrap_or(false) {
@@ -4209,11 +4112,7 @@ impl AiMemoryServer {
             from_agent: AgentKind::Other,
             to_agent: None,
             cwd: args.cwd.map(std::path::PathBuf::from),
-            summary: cap_text_with_marker(
-                &s.scrub(&args.summary),
-                HANDOFF_SUMMARY_MAX_CHARS,
-                "handoff summary",
-            ),
+            summary,
             open_questions,
             next_steps,
             files_touched,
@@ -5695,7 +5594,10 @@ fn test_optional_parts() -> OptionalParts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ai_memory_core::{Sanitized, Sanitizer};
+    use ai_memory_core::{
+        HANDOFF_FILE_MAX_CHARS, HANDOFF_ITEM_MAX_CHARS, HANDOFF_SUMMARY_MAX_CHARS, Sanitized,
+        Sanitizer, cap_handoff_list,
+    };
     use std::collections::BTreeSet;
 
     #[test]
