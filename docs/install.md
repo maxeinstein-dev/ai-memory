@@ -1899,6 +1899,23 @@ Replace the model with another current OrcaRouter model id (same
 `provider/model` format as OpenRouter, e.g. `anthropic/claude-sonnet-4.6` or
 `deepseek/deepseek-v4-flash`) when needed.
 
+[Cheaper Inference](https://cheaperinference.com) is an OpenAI-compatible LLM
+gateway that advertises models below each lab's list price. It uses
+the same provider; no dedicated ai-memory provider is needed.
+Pass its API key through the generic compatibility credential:
+
+```bash
+-e AI_MEMORY_LLM_PROVIDER=openai-compat
+-e AI_MEMORY_LLM_BASE_URL=https://api.cheaperinference.com/v1
+-e AI_MEMORY_LLM_MODEL=gpt-5.4-mini
+-e LLM_API_KEY=ci_live_...
+```
+
+Model ids are bare, without a `provider/` prefix. Replace the model with
+another current Cheaper Inference model id (e.g. `claude-haiku-4.5` or
+`deepseek-v4-flash`) when needed. Cheaper Inference serves chat models only
+and has no embeddings endpoint; configure embeddings separately.
+
 OpenAI-compatible structured calls use the operation's JSON Schema by default:
 
 ```bash
@@ -2167,7 +2184,9 @@ remote or uses a custom host/port.
                             "scratch" only as a defensive fallback for
                             hook events with no usable cwd.)
 --max-input-tokens N       (default: 150000; total source budget after prune)
---chunk-input-tokens N     (default: 24000; per LLM call; 0 = single call)
+--chunk-input-tokens N     (default: 24000; per LLM call, each asking for up
+                            to 16K output tokens; 0 = single call asking for
+                            up to 64K, so input + 64K must fit the context)
 --since "30 days ago"      (git log filter; supports "N days/months/years ago" + YYYY-MM-DD)
 --exclude-git              (skip commit history)
 --exclude-readme           (skip README)
@@ -2176,6 +2195,12 @@ remote or uses a custom host/port.
 --dry-run                  (collect + estimate but don't call LLM or write)
 --force                    (re-bootstrap, overwrites the prior manifest)
 ```
+
+**Budgets and the estimate.** Bootstrap estimates tokens as bytes ÷ 4, which
+undercounts non-English text and code, so it fills only 80% of
+`--max-input-tokens` and of each `--chunk-input-tokens` by that estimate. The
+dry run still reports tokens by the same estimate; the sources it keeps and the
+chunks it plans reflect the margin.
 
 **Cost.** With Kimi 2.6 via OpenRouter ($0.73/$3.49 per M):
 - 50k input tokens cap → ~$0.04 worst case input

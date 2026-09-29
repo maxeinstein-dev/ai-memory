@@ -698,6 +698,7 @@ const fn closed_tool_agent(agent: AgentKind) -> bool {
             | AgentKind::Pi
             | AgentKind::Omp
             | AgentKind::AntigravityCli
+            | AgentKind::Grok
             | AgentKind::Hermes
             | AgentKind::Pool
             | AgentKind::Zcode
@@ -915,7 +916,7 @@ fn best_title_hint(event: HookEvent, raw: &serde_json::Value) -> Option<String> 
             // Kimi Code sends `prompt` as content blocks
             // (`[{"type":"text","text":...}]`); `extract_content` flattens
             // them and returns identical values for plain-string agents.
-            extract_content(raw, &["prompt", "message", "text"]).map(|s| truncate_for_title(&s))
+            extract_content(raw, &["prompt", "message", "text"]).map(|s| first_line(&s))
         }
         HookEvent::PreToolUse | HookEvent::PostToolUse => {
             extract_string(raw, &["tool", "tool_name", "name"])
@@ -932,7 +933,7 @@ fn best_title_hint(event: HookEvent, raw: &serde_json::Value) -> Option<String> 
 
 fn extension_title_hint(raw: &serde_json::Value, source_event: &str) -> String {
     extract_string(raw, &["title", "summary", "subject", "name"])
-        .map(|s| truncate_for_title(&s))
+        .map(|s| first_line(&s))
         .unwrap_or_else(|| source_event.to_string())
 }
 
@@ -1025,16 +1026,18 @@ fn best_body_excerpt(event: HookEvent, raw: &serde_json::Value) -> Option<String
     }
 }
 
-pub(crate) fn truncate_for_title(s: &str) -> String {
-    const MAX: usize = 80;
-    let one_line: String = s.chars().take_while(|c| *c != '\n').collect();
-    if one_line.chars().count() <= MAX {
-        one_line
-    } else {
-        let mut buf: String = one_line.chars().take(MAX - 1).collect();
-        buf.push('…');
-        buf
-    }
+/// Reduce a hook-supplied string to its first line, discarding everything
+/// after the first `\n`.
+///
+/// This is the only shaping `title_hint` gets before it reaches the
+/// sanitizer: the 80-char display cap used to happen here too, but that ran
+/// *before* redaction and could cut a secret in half — the truncated prefix
+/// was then too short to match the sanitizer's pattern, so it was stored in
+/// clear text (#980). The length cap now lives in
+/// `ai_memory_core::sanitize::truncate_for_title`, applied by
+/// `Sanitized::new` *after* `Sanitizer::scrub`.
+fn first_line(s: &str) -> String {
+    s.chars().take_while(|c| *c != '\n').collect()
 }
 
 fn truncate_excerpt(s: &str) -> String {
@@ -2124,10 +2127,13 @@ mod tests {
 
     /// Title-hint extraction must truncate at the first newline (the
     /// "first line" rule used everywhere in the wiki log + handoff
-    /// surfaces) and cap at 80 chars to keep observation titles
-    /// scannable in the log.md heading.
+    /// surfaces), but must NOT cap length here any more: the 80-char display
+    /// cap moved to `ai_memory_core::sanitize::truncate_for_title`, applied
+    /// by `Sanitized::new` after redaction (#980) — truncating a long
+    /// `title_hint` in `payload.rs`, before the sanitizer ever runs, could
+    /// cut a secret in half and leave the unmatched fragment unredacted.
     #[test]
-    fn user_prompt_title_truncates_at_newline_and_at_max_chars() {
+    fn user_prompt_title_keeps_first_line_full_length_untruncated() {
         let q = HookQuery {
             event: "user-prompt".into(),
             agent: Some("claude-code".into()),
@@ -2140,12 +2146,13 @@ mod tests {
         );
         assert_eq!(env.title_hint.as_deref(), Some("first line"));
 
-        // Very long single line → truncated with ellipsis.
+        // Very long single line → title_hint keeps every character; the
+        // 80-char cap now happens later, after sanitization.
         let long = "x".repeat(200);
         let env = HookEnvelope::from_query_and_body(q, serde_json::json!({ "prompt": long }));
         let title = env.title_hint.unwrap();
-        assert!(title.chars().count() <= 80);
-        assert!(title.ends_with('…'));
+        assert_eq!(title.chars().count(), 200);
+        assert!(!title.contains('…'));
     }
 
     #[test]
@@ -2328,6 +2335,35 @@ mod tests {
         assert!(
             body.contains("MARKER_OBJ_456"),
             "object tool_response should be serialized into the body: {body:?}"
+        );
+    }
+
+    /// Grok Build CLI posts a `PostToolUse` with Claude Code's snake_case
+    /// aliases (`tool_name` / `tool_input` / `tool_use_id`). It was absent from
+    /// both `closed_tool_agent` and the `tool_observation_metadata` match, so
+    /// every Grok tool observation was stored with an empty body (#931).
+    #[test]
+    fn grok_post_tool_excerpt_captures_tool_response() {
+        let q = HookQuery {
+            event: "post-tool-use".into(),
+            agent: Some("grok".into()),
+            ..Default::default()
+        };
+        let env = HookEnvelope::from_query_and_body(
+            q,
+            serde_json::json!({
+                "tool_name": "Bash",
+                "tool_input": {"command": "ls"},
+                "tool_use_id": "call_grok_1",
+                "tool_response": {"stdout": "MARKER_GROK_931"},
+            }),
+        );
+        let body = env
+            .body_excerpt
+            .expect("grok post-tool body should not be empty");
+        assert!(
+            body.contains("MARKER_GROK_931"),
+            "grok tool_response should be serialized into the body: {body:?}"
         );
     }
 

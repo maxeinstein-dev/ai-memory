@@ -887,7 +887,7 @@ async fn handle_export_okf(
         Ok(ids) => ids,
         Err((status, body)) => return (status, body).into_response(),
     };
-    match build_okf_bundle_file(&state, ids.0, ids.1).await {
+    match build_okf_bundle_file(&state, ids.0, ids.1, q.project.trim()).await {
         Ok(file) => Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/gzip")
@@ -914,6 +914,7 @@ async fn build_okf_bundle_file(
     state: &AdminState,
     ws: ai_memory_core::WorkspaceId,
     proj: ai_memory_core::ProjectId,
+    project_name: &str,
 ) -> anyhow::Result<tokio::fs::File> {
     let bundle_dir = state
         .data_dir
@@ -924,8 +925,11 @@ async fn build_okf_bundle_file(
         anyhow::bail!("project has no wiki directory yet");
     }
 
-    // Validate + collect: every non-reserved .md must be conformant.
-    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    // Validate + collect: every non-reserved .md must be conformant. Keep
+    // the raw bytes read here (rather than re-reading from disk below) —
+    // the export augments a page's frontmatter/body only in the tarred
+    // copy, so the file is read exactly once.
+    let mut files: Vec<(std::path::PathBuf, String)> = Vec::new();
     let mut families: Vec<String> = Vec::new();
     let mut stack = vec![bundle_dir.clone()];
     while let Some(dir) = stack.pop() {
@@ -971,7 +975,7 @@ async fn build_okf_bundle_file(
                         path.strip_prefix(&bundle_dir).unwrap_or(&path).display()
                     );
                 }
-                files.push(path);
+                files.push((path, raw));
             }
         }
     }
@@ -982,23 +986,31 @@ async fn build_okf_bundle_file(
         let mut tar = tar::Builder::new(encoder);
         tar.mode(tar::HeaderMode::Deterministic);
         tar.follow_symlinks(false);
-        // Fresh bundle-root index.md: okf_version + full listing.
+        // Fresh bundle-root index.md: okf_version + full listing, with no
+        // prose outside the list structure (some strict OKF validators
+        // read §11.3 as rejecting a stray sentence — issue #960 item 1).
         families.sort();
         let listing: String = families
             .iter()
             .map(|f| format!("- [{f}/]({f}/)\n"))
             .collect();
         let index = format!(
-            "---\nokf_version: \"0.2\"\n---\n\n# Bundle index\n\nConcept files live in these directories:\n\n{listing}"
+            "---\nokf_version: \"0.2\"\n---\n\n# Bundle index — concept files by directory\n\n{listing}"
         );
         let mut header = tar::Header::new_gnu();
         header.set_size(index.len() as u64);
         header.set_mode(0o644);
         header.set_cksum();
         tar.append_data(&mut header, "index.md", index.as_bytes())?;
-        for path in files {
+        for (path, raw) in files {
             let rel = path.strip_prefix(&bundle_dir).unwrap_or(&path);
-            tar.append_path_with_name(&path, rel)?;
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            let bytes = augment_page_for_export(&raw, &rel_str, project_name)?;
+            let mut header = tar::Header::new_gnu();
+            header.set_size(bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            tar.append_data(&mut header, &rel_str, bytes.as_slice())?;
         }
         let encoder = tar.into_inner()?;
         encoder.finish()?;
@@ -1006,6 +1018,67 @@ async fn build_okf_bundle_file(
     tar_file.sync_data()?;
     tar_file.rewind()?;
     Ok(tokio::fs::File::from_std(tar_file))
+}
+
+/// Export-only augmentation of one wiki page's bytes for the OKF bundle:
+/// backfills `title`/`description` when derivable and rewrites local
+/// wikilinks to bundle-relative Markdown links (issue #960 items 2 and 3).
+/// Never touches the on-disk wiki file — the caller tars the returned
+/// bytes instead of the source file.
+fn augment_page_for_export(
+    raw: &str,
+    rel_path: &str,
+    project_name: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let page_path = ai_memory_core::PagePath::new(rel_path.to_string())?;
+    let mut md = ai_memory_wiki::parse(raw)?;
+
+    let title_missing = md
+        .frontmatter
+        .get("title")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|t| t.trim().is_empty());
+    let title =
+        title_missing.then(|| ai_memory_wiki::derive_title(&md.frontmatter, &md.body, &page_path));
+
+    let description_missing = md
+        .frontmatter
+        .get("description")
+        .and_then(serde_json::Value::as_str)
+        .is_none_or(|d| d.trim().is_empty());
+    let description = description_missing
+        .then(|| {
+            md.frontmatter
+                .get("summary")
+                .and_then(serde_json::Value::as_str)
+                .filter(|s| !s.trim().is_empty())
+                .or_else(|| {
+                    md.frontmatter
+                        .get("abstract")
+                        .and_then(serde_json::Value::as_str)
+                        .filter(|s| !s.trim().is_empty())
+                })
+                .map(str::to_string)
+        })
+        .flatten();
+
+    if !md.frontmatter.is_object() {
+        md.frontmatter = serde_json::Value::Object(serde_json::Map::new());
+    }
+    let map = md
+        .frontmatter
+        .as_object_mut()
+        .expect("object ensured above");
+    if let Some(title) = title {
+        map.insert("title".into(), serde_json::Value::String(title));
+    }
+    if let Some(description) = description {
+        map.insert("description".into(), serde_json::Value::String(description));
+    }
+
+    md.body = ai_memory_wiki::rewrite_local_wikilinks(&md.body, &page_path, project_name);
+
+    Ok(ai_memory_wiki::emit(&md)?.into_bytes())
 }
 
 // ---------------------------------------------------------------------
@@ -8543,6 +8616,214 @@ mod tests {
         let fm = ai_memory_wiki::parse(&page_body).unwrap().frontmatter;
         assert!(ai_memory_core::okf::is_conformant(&fm));
         assert_eq!(fm["type"], "Gotcha");
+    }
+
+    /// Issue #960 item 1: strict OKF validators read §11.3 ("follows the
+    /// structure in §8") as rejecting prose outside the list structure. The
+    /// generated `index.md` body, once its heading line is stripped, must
+    /// consist only of blank lines and `- [...]` list entries.
+    #[tokio::test]
+    async fn export_okf_index_has_no_prose_outside_the_list() {
+        let (_tmp, router) = read_page_test_router();
+        post_write_page(
+            &router,
+            "default",
+            "scratch",
+            "gotchas/build.md",
+            "watch out",
+        )
+        .await;
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/export-okf?workspace=default&project=scratch")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let dec = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes.to_vec()));
+        let mut ar = tar::Archive::new(dec);
+        let mut index_body = String::new();
+        for entry in ar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap().display().to_string() == "index.md" {
+                use std::io::Read as _;
+                entry.read_to_string(&mut index_body).unwrap();
+            }
+        }
+        let parsed = ai_memory_wiki::parse(&index_body).unwrap();
+        for line in parsed.body.lines() {
+            let trimmed = line.trim();
+            assert!(
+                trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("- "),
+                "prose line outside the list structure: {line:?}\nfull body: {}",
+                parsed.body
+            );
+        }
+    }
+
+    /// Issue #960 item 2: `derive_title` already knows the title (H1 or
+    /// path stem), but until now nothing wrote it into exported frontmatter.
+    /// Export-only: `title`/`description` land in the bundle's copy, never
+    /// on the on-disk wiki file.
+    #[tokio::test]
+    async fn export_okf_backfills_title_and_description() {
+        let (tmp, router) = read_page_test_router();
+        post_write_page(&router, "default", "scratch", "notes/seed.md", "seed").await;
+        let proj_dir = scratch_project_dir(tmp.path());
+        std::fs::create_dir_all(proj_dir.join("concepts")).unwrap();
+
+        // No title, no description/summary/abstract at all: title derives
+        // from the H1 heading; no description key is invented.
+        std::fs::write(
+            proj_dir.join("concepts/no-title.md"),
+            "---\ntype: Concept\n---\n\n# Heading Title\n\nBody.\n",
+        )
+        .unwrap();
+        // `summary` present: description comes from it.
+        std::fs::write(
+            proj_dir.join("concepts/has-summary.md"),
+            "---\ntype: Concept\nsummary: from summary\n---\n\nBody.\n",
+        )
+        .unwrap();
+        // `abstract` but no `summary`: description falls back to it.
+        std::fs::write(
+            proj_dir.join("concepts/has-abstract.md"),
+            "---\ntype: Concept\nabstract: from abstract\n---\n\nBody.\n",
+        )
+        .unwrap();
+        // Explicit title/description already present: untouched.
+        std::fs::write(
+            proj_dir.join("concepts/explicit.md"),
+            "---\ntype: Concept\ntitle: Explicit Title\ndescription: Explicit description\nsummary: ignored\n---\n\nBody.\n",
+        )
+        .unwrap();
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/export-okf?workspace=default&project=scratch")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let dec = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes.to_vec()));
+        let mut ar = tar::Archive::new(dec);
+        let mut bodies = std::collections::HashMap::new();
+        for entry in ar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            let name = entry.path().unwrap().display().to_string();
+            use std::io::Read as _;
+            let mut content = String::new();
+            entry.read_to_string(&mut content).unwrap();
+            bodies.insert(name, content);
+        }
+
+        let no_title = ai_memory_wiki::parse(&bodies["concepts/no-title.md"])
+            .unwrap()
+            .frontmatter;
+        assert_eq!(no_title["title"], "Heading Title");
+        assert!(no_title.get("description").is_none(), "{no_title:?}");
+
+        let has_summary = ai_memory_wiki::parse(&bodies["concepts/has-summary.md"])
+            .unwrap()
+            .frontmatter;
+        assert_eq!(has_summary["description"], "from summary");
+
+        let has_abstract = ai_memory_wiki::parse(&bodies["concepts/has-abstract.md"])
+            .unwrap()
+            .frontmatter;
+        assert_eq!(has_abstract["description"], "from abstract");
+
+        let explicit = ai_memory_wiki::parse(&bodies["concepts/explicit.md"])
+            .unwrap()
+            .frontmatter;
+        assert_eq!(explicit["title"], "Explicit Title");
+        assert_eq!(explicit["description"], "Explicit description");
+
+        // Never mutated on disk.
+        let on_disk = std::fs::read_to_string(proj_dir.join("concepts/no-title.md")).unwrap();
+        let on_disk_fm = ai_memory_wiki::parse(&on_disk).unwrap().frontmatter;
+        assert!(on_disk_fm.get("title").is_none(), "{on_disk_fm:?}");
+    }
+
+    /// Issue #960 item 3: a generic OKF consumer has no idea what
+    /// `[[decisions/b.md]]` means. Local wikilinks become bundle-relative
+    /// Markdown links at export; a cross-project wikilink has no Markdown
+    /// equivalent and ships untouched.
+    #[tokio::test]
+    async fn export_okf_rewrites_local_wikilinks_to_relative_markdown_links() {
+        let (tmp, router) = read_page_test_router();
+        post_write_page(&router, "default", "scratch", "notes/seed.md", "seed").await;
+        let proj_dir = scratch_project_dir(tmp.path());
+        std::fs::create_dir_all(proj_dir.join("concepts")).unwrap();
+        std::fs::create_dir_all(proj_dir.join("decisions")).unwrap();
+        std::fs::write(
+            proj_dir.join("decisions/b.md"),
+            "---\ntype: Decision\n---\n\nB.\n",
+        )
+        .unwrap();
+        std::fs::write(
+            proj_dir.join("concepts/a.md"),
+            "---\ntype: Concept\n---\n\nSee [[decisions/b.md]] and [[other-project:x.md]].\n",
+        )
+        .unwrap();
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/admin/export-okf?workspace=default&project=scratch")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let dec = flate2::read::GzDecoder::new(std::io::Cursor::new(bytes.to_vec()));
+        let mut ar = tar::Archive::new(dec);
+        let mut a_body = String::new();
+        for entry in ar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            if entry.path().unwrap().display().to_string() == "concepts/a.md" {
+                use std::io::Read as _;
+                entry.read_to_string(&mut a_body).unwrap();
+            }
+        }
+        let parsed = ai_memory_wiki::parse(&a_body).unwrap();
+        assert!(
+            parsed.body.contains("[decisions/b.md](../decisions/b.md)"),
+            "{}",
+            parsed.body
+        );
+        assert!(
+            parsed.body.contains("[[other-project:x.md]]"),
+            "cross-project wikilink must ship untouched: {}",
+            parsed.body
+        );
+
+        // Never mutated on disk.
+        let on_disk = std::fs::read_to_string(proj_dir.join("concepts/a.md")).unwrap();
+        assert!(on_disk.contains("[[decisions/b.md]]"));
     }
 
     /// Post-audit regression: the things a REAL deployment's tree holds
